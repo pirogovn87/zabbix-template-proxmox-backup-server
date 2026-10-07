@@ -12,7 +12,7 @@ No Zabbix agent and nothing to install on the PBS host.
 ## What is monitored
 
 The template is intentionally lightweight: only what is needed to know that backups are fine.
-For a PBS with 2 datastores, ~25 backup groups and 6 jobs it creates about 45 items.
+For a PBS with 2 datastores, ~25 backup groups and 6 jobs it creates about 50 items.
 
 | Area | Details |
 |---|---|
@@ -20,6 +20,7 @@ For a PBS with 2 datastores, ~25 backup groups and 6 jobs it creates about 45 it
 | **Failed backups** | Every backup task that fails on PBS creates a **High** problem within 5 minutes, e.g. `PBS: Backup failed: 2026-10-07 03:00 Backup-Lan:ct/118: <error>`. Resolves when there are no failed backups during the last 24h, or close it manually |
 | **Scheduled PBS jobs** (sync, verify, prune, garbage collection) | Auto-discovered, named by datastore / namespace. Result of the last run. Triggers: last run failed (error text in the problem name), finished with warnings |
 | **Datastores** | Space utilization % and available space. Triggers at 80% / 90% |
+| **Disks** | SMART health of every physical disk. **High** when SMART reports the disk as failing (model and serial number in operational data) |
 | **System** | CPU utilization, root filesystem usage |
 | **API** | Availability. All other triggers depend on `PBS: API is unavailable`, so a PBS outage produces one problem instead of dozens |
 
@@ -31,6 +32,7 @@ For a PBS with 2 datastores, ~25 backup groups and 6 jobs it creates about 45 it
 | Get node status (CPU, root FS) | `/nodes/localhost/status` | 1m |
 | Failed backups | `/nodes/localhost/tasks?typefilter=backup&errors=1` | 5m |
 | Get datastore usage | `/status/datastore-usage` | 5m |
+| Get disks (SMART) | `/nodes/localhost/disks/list` | 1h |
 | Get sync / verify / prune / GC job status | `/admin/sync`, `/admin/verify`, `/admin/prune`, `/admin/gc` | 5m |
 
 "Get ..." items keep no history: dependent items take their values from that JSON.
@@ -94,6 +96,7 @@ The TLS certificate is not verified, so the default self-signed PBS certificate 
 | `{$PBS.TASKS.INTERVAL}` | `5m` | Failed backups polling interval |
 | `{$PBS.TASKS.PERIOD}` | `24` | Failed backups are reported for N hours |
 | `{$PBS.TASKS.LIMIT}` | `500` | Max failed backup tasks requested |
+| `{$PBS.DISK.MATCHES}` / `NOT_MATCHES` | `.*` / `^(zd\|loop\|ram\|rbd)` | Disk filter (regex) |
 | `{$PBS.DATASTORE.MATCHES}` / `NOT_MATCHES` | `.*` / `CHANGE_IF_NEEDED` | Datastore filter (regex) |
 | `{$PBS.DATASTORE.PUSED.WARN}` | `80` | Datastore usage warning, %. Context: `{$PBS.DATASTORE.PUSED.WARN:"store1"}` |
 | `{$PBS.DATASTORE.PUSED.CRIT}` | `90` | Datastore usage high, %. Supports context |

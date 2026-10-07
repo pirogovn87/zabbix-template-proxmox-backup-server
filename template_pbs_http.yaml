@@ -16,6 +16,7 @@ zabbix_export:
       - failed backup tasks: alert right after a backup fails, error text in the problem name;
       - CPU utilization, root filesystem usage;
       - datastores: space utilization and available space;
+      - physical disks: SMART health;
       - freshness of every backup group (vm/ct/host) in every datastore and namespace:
         AVERAGE after {$PBS.GROUP.AGE.WARN}h, HIGH after {$PBS.GROUP.AGE.CRIT}h without a new snapshot;
       - sync, verify, prune and garbage collection jobs: result of the last run (error text in the problem name).
@@ -223,6 +224,26 @@ zabbix_export:
         - $.data
       timeout: '{$PBS.TIMEOUT}'
       url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/status/datastore-usage'
+      headers:
+      - name: Authorization
+        value: PBSAPIToken={$PBS.TOKEN.ID}:{$PBS.TOKEN.SECRET}
+      tags:
+      - tag: component
+        value: raw
+    - uuid: 649c34f12e704ed6af8d53620d399e35
+      name: 'PBS: Get disks'
+      type: HTTP_AGENT
+      key: pbs.disks
+      delay: 1h
+      history: '0'
+      value_type: TEXT
+      description: Raw list of physical disks with SMART status (PBS runs smartctl for this request).
+      preprocessing:
+      - type: JSONPATH
+        parameters:
+        - $.data
+      timeout: '{$PBS.TIMEOUT}'
+      url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/nodes/{$PBS.NODE}/disks/list'
       headers:
       - name: Authorization
         value: PBSAPIToken={$PBS.TOKEN.ID}:{$PBS.TOKEN.SECRET}
@@ -614,6 +635,68 @@ zabbix_export:
       lld_macro_paths:
       - lld_macro: '{#STORE}'
         path: $.store
+    - uuid: d4d0d501d5c043ac8eb5b43ebb9916ac
+      name: 'PBS: Disk discovery'
+      type: DEPENDENT
+      key: pbs.disk.discovery
+      delay: '0'
+      filter:
+        evaltype: AND
+        conditions:
+        - macro: '{#DISK}'
+          value: '{$PBS.DISK.MATCHES}'
+          operator: MATCHES_REGEX
+          formulaid: A
+        - macro: '{#DISK}'
+          value: '{$PBS.DISK.NOT_MATCHES}'
+          operator: NOT_MATCHES_REGEX
+          formulaid: B
+      lifetime: '{$PBS.LLD.LIFETIME}'
+      enabled_lifetime_type: DISABLE_NEVER
+      description: Discovers physical disks.
+      item_prototypes:
+      - uuid: 8c93148954664a70a2a954fb36e15433
+        name: 'PBS: Disk [{#DISK}]: SMART status'
+        type: DEPENDENT
+        key: pbs.disk.smart[{#DISK}]
+        delay: '0'
+        history: 30d
+        description: 'SMART overall health: 0 passed, 1 failed, 2 unknown.'
+        valuemap:
+          name: PBS SMART status
+        preprocessing:
+        - type: JAVASCRIPT
+          parameters:
+          - |
+            var d = JSON.parse(value).filter(function (x) { return x.name === '{#DISK}'; })[0];
+            if (!d) throw 'Disk {#DISK} not found';
+            return d.status === 'passed' ? 0 : (d.status === 'failed' ? 1 : 2);
+        master_item:
+          key: pbs.disks
+        tags:
+        - tag: component
+          value: disk
+        - tag: disk
+          value: '{#DISK}'
+        trigger_prototypes:
+        - uuid: c1923cb689d84dfd89fd457db844146f
+          expression: last(/Proxmox Backup Server by HTTP/pbs.disk.smart[{#DISK}])=1
+          name: 'PBS: Disk [{#DISK}]: SMART health check failed'
+          priority: HIGH
+          description: SMART reports that the disk is failing. Replace it.
+          dependencies:
+          - name: 'PBS: API is unavailable'
+            expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
+          opdata: '{#DISK.MODEL}, S/N {#DISK.SERIAL}'
+      master_item:
+        key: pbs.disks
+      lld_macro_paths:
+      - lld_macro: '{#DISK}'
+        path: $.name
+      - lld_macro: '{#DISK.MODEL}'
+        path: $.model
+      - lld_macro: '{#DISK.SERIAL}'
+        path: $.serial
     - uuid: 5cd22111914843318f7fad44742984df
       name: 'PBS: Datastore [{#STORE}]: Namespace discovery'
       type: HTTP_AGENT
@@ -1119,6 +1202,12 @@ zabbix_export:
     - macro: '{$PBS.ROOTFS.PUSED.MAX}'
       value: '90'
       description: Root filesystem utilization threshold, %.
+    - macro: '{$PBS.DISK.MATCHES}'
+      value: .*
+      description: Disks to discover (regex).
+    - macro: '{$PBS.DISK.NOT_MATCHES}'
+      value: ^(zd|loop|ram|rbd)
+      description: Disks to skip (regex).
     - macro: '{$PBS.DATASTORE.MATCHES}'
       value: .*
       description: Datastores to discover (regex).
@@ -1175,3 +1264,12 @@ zabbix_export:
         newvalue: Unavailable
       - value: '1'
         newvalue: Available
+    - uuid: 844a8f91cd6f4b8e9303f75605df72d2
+      name: PBS SMART status
+      mappings:
+      - value: '0'
+        newvalue: Passed
+      - value: '1'
+        newvalue: Failed
+      - value: '2'
+        newvalue: Unknown
