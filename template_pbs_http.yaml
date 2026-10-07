@@ -3274,10 +3274,10 @@ zabbix_export:
     expression: 'last(/Proxmox Backup Server by HTTP/pbs.tasks.count[backup,error])>0 and length(last(/Proxmox Backup Server by HTTP/pbs.tasks.failed[backup]))>0'
     name: 'PBS: Backup tasks failed in the last {$PBS.TASKS.PERIOD}h'
     event_name: 'PBS: Backup tasks failed in the last {$PBS.TASKS.PERIOD}h ({ITEM.LASTVALUE1}): {ITEM.LASTVALUE2}'
-    opdata: '{ITEM.LASTVALUE2}'
+    opdata: 'Failed: {ITEM.LASTVALUE1}'
     priority: HIGH
     manual_close: 'YES'
-    description: 'There are failed tasks of category "backup" during the last {$PBS.TASKS.PERIOD} hours. The most recent of them are shown in the problem name and operational data; the full list is in item "PBS: Failed tasks list". The problem resolves itself when the failed tasks age out of the period, or can be closed manually.'
+    description: 'There are failed tasks of category "backup" during the last {$PBS.TASKS.PERIOD} hours. The most recent of them are shown in the problem name; the full list is in item "PBS: Failed tasks list". The problem resolves itself when the failed tasks age out of the period, or can be closed manually.'
     dependencies:
     - name: 'PBS: API is unavailable'
       expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
@@ -3290,10 +3290,10 @@ zabbix_export:
     expression: 'last(/Proxmox Backup Server by HTTP/pbs.tasks.count[restore,error])>0 and length(last(/Proxmox Backup Server by HTTP/pbs.tasks.failed[restore]))>0'
     name: 'PBS: Restore tasks failed in the last {$PBS.TASKS.PERIOD}h'
     event_name: 'PBS: Restore tasks failed in the last {$PBS.TASKS.PERIOD}h ({ITEM.LASTVALUE1}): {ITEM.LASTVALUE2}'
-    opdata: '{ITEM.LASTVALUE2}'
+    opdata: 'Failed: {ITEM.LASTVALUE1}'
     priority: AVERAGE
     manual_close: 'YES'
-    description: 'There are failed tasks of category "restore" during the last {$PBS.TASKS.PERIOD} hours. The most recent of them are shown in the problem name and operational data; the full list is in item "PBS: Failed tasks list". The problem resolves itself when the failed tasks age out of the period, or can be closed manually.'
+    description: 'There are failed tasks of category "restore" during the last {$PBS.TASKS.PERIOD} hours. The most recent of them are shown in the problem name; the full list is in item "PBS: Failed tasks list". The problem resolves itself when the failed tasks age out of the period, or can be closed manually.'
     dependencies:
     - name: 'PBS: API is unavailable'
       expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
@@ -3306,10 +3306,10 @@ zabbix_export:
     expression: 'last(/Proxmox Backup Server by HTTP/pbs.tasks.count[other,error])>0 and length(last(/Proxmox Backup Server by HTTP/pbs.tasks.failed[other]))>0'
     name: 'PBS: Other tasks failed in the last {$PBS.TASKS.PERIOD}h'
     event_name: 'PBS: Other tasks failed in the last {$PBS.TASKS.PERIOD}h ({ITEM.LASTVALUE1}): {ITEM.LASTVALUE2}'
-    opdata: '{ITEM.LASTVALUE2}'
+    opdata: 'Failed: {ITEM.LASTVALUE1}'
     priority: WARNING
     manual_close: 'YES'
-    description: 'There are failed tasks of category "other" during the last {$PBS.TASKS.PERIOD} hours. The most recent of them are shown in the problem name and operational data; the full list is in item "PBS: Failed tasks list". The problem resolves itself when the failed tasks age out of the period, or can be closed manually.'
+    description: 'There are failed tasks of category "other" during the last {$PBS.TASKS.PERIOD} hours. The most recent of them are shown in the problem name; the full list is in item "PBS: Failed tasks list". The problem resolves itself when the failed tasks age out of the period, or can be closed manually.'
     dependencies:
     - name: 'PBS: API is unavailable'
       expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
