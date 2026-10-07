@@ -17,6 +17,7 @@ For a PBS with 2 datastores, ~25 backup groups and 6 jobs it creates about 45 it
 | Area | Details |
 |---|---|
 | **Backup groups** (`vm/<id>`, `ct/<id>`, `host/<name>` in every datastore and namespace) | Age of the newest snapshot. **Average** when there is no new backup for 26h, **High** after 50h. Catches backup jobs that silently stopped running or failed on the PVE side |
+| **Failed backups** | Every backup task that fails on PBS creates a **High** problem within 5 minutes, e.g. `PBS: Backup failed: 2026-10-07 03:00 Backup-Lan:ct/118: <error>`. Resolves when there are no failed backups during the last 24h, or close it manually |
 | **Scheduled PBS jobs** (sync, verify, prune, garbage collection) | Auto-discovered, named by datastore / namespace. Result of the last run. Triggers: last run failed (error text in the problem name), finished with warnings |
 | **Datastores** | Space utilization % and available space. Triggers at 80% / 90% |
 | **System** | CPU utilization, root filesystem usage |
@@ -28,6 +29,7 @@ For a PBS with 2 datastores, ~25 backup groups and 6 jobs it creates about 45 it
 |---|---|---|
 | API availability | `/version` | 1m |
 | Get node status (CPU, root FS) | `/nodes/localhost/status` | 1m |
+| Failed backups | `/nodes/localhost/tasks?typefilter=backup&errors=1` | 5m |
 | Get datastore usage | `/status/datastore-usage` | 5m |
 | Get sync / verify / prune / GC job status | `/admin/sync`, `/admin/verify`, `/admin/prune`, `/admin/gc` | 5m |
 
@@ -46,7 +48,7 @@ Each backup group is one HTTP item polled every 15 minutes (`{$PBS.GROUP.INTERVA
 because Zabbix does not allow dependent items across nested discovery levels.
 
 > Backup jobs configured in **Proxmox VE** (Datacenter → Backup) are PVE objects and are not visible in
-> the PBS API. They are covered by backup group freshness.
+> the PBS API. They are covered twice: a failed backup task alerts at once, and backup group freshness catches a job that did not run at all.
 
 ## Setup
 
@@ -89,6 +91,9 @@ The TLS certificate is not verified, so the default self-signed PBS certificate 
 | `{$PBS.LLD.LIFETIME}` | `7d` | Keep lost resources for |
 | `{$PBS.CPU.UTIL.CRIT}` | `90` | CPU utilization, % |
 | `{$PBS.ROOTFS.PUSED.MAX}` | `90` | Root filesystem utilization, % |
+| `{$PBS.TASKS.INTERVAL}` | `5m` | Failed backups polling interval |
+| `{$PBS.TASKS.PERIOD}` | `24` | Failed backups are reported for N hours |
+| `{$PBS.TASKS.LIMIT}` | `500` | Max failed backup tasks requested |
 | `{$PBS.DATASTORE.MATCHES}` / `NOT_MATCHES` | `.*` / `CHANGE_IF_NEEDED` | Datastore filter (regex) |
 | `{$PBS.DATASTORE.PUSED.WARN}` | `80` | Datastore usage warning, %. Context: `{$PBS.DATASTORE.PUSED.WARN:"store1"}` |
 | `{$PBS.DATASTORE.PUSED.CRIT}` | `90` | Datastore usage high, %. Supports context |

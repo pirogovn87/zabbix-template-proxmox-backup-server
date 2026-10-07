@@ -13,6 +13,7 @@ zabbix_export:
 
       Monitors:
       - API availability;
+      - failed backup tasks: alert right after a backup fails, error text in the problem name;
       - CPU utilization, root filesystem usage;
       - datastores: space utilization and available space;
       - freshness of every backup group (vm/ct/host) in every datastore and namespace:
@@ -139,6 +140,72 @@ zabbix_export:
         priority: AVERAGE
         opdata: 'Used: {ITEM.LASTVALUE1}'
         description: Root filesystem of PBS is almost full. Logs and task archive may stop being written.
+        dependencies:
+        - name: 'PBS: API is unavailable'
+          expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
+    - uuid: 99ea054ddd5f46fc9562661ca5385ab9
+      name: 'PBS: Failed backups (period)'
+      type: HTTP_AGENT
+      key: pbs.backup.failed
+      delay: '{$PBS.TASKS.INTERVAL}'
+      history: 7d
+      value_type: TEXT
+      description: |-
+        Backup tasks (pushed from PVE / proxmox-backup-client) that failed during the last {$PBS.TASKS.PERIOD} hours, newest first:
+        "YYYY-MM-DD HH:MM <datastore>:<type>/<id>: <error>". Empty when there are none.
+      preprocessing:
+      - type: JAVASCRIPT
+        parameters:
+        - |
+          var since = Math.floor(Date.now() / 1000) - parseFloat('{$PBS.TASKS.PERIOD}') * 3600;
+          function pad(n) { return n < 10 ? '0' + n : '' + n; }
+          function fmt(ts) {
+              var d = new Date(ts * 1000);
+              return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' '
+                  + pad(d.getHours()) + ':' + pad(d.getMinutes());
+          }
+          var failed = (JSON.parse(value).data || []).filter(function (t) {
+              var s = String(t.status || '');
+              return t.worker_type === 'backup' && t.endtime && t.starttime >= since
+                  && s !== 'OK' && !/^WARNINGS/.test(s);
+          }).sort(function (a, b) { return b.starttime - a.starttime; });
+          // The first 16 characters (time of the newest failure) are used by the trigger to detect a new failure
+          return failed.slice(0, 5).map(function (t) {
+              var line = fmt(t.starttime) + ' ' + (t.worker_id || '-') + ': ' + t.status;
+              return line.length > 300 ? line.substring(0, 297) + '...' : line;
+          }).join('\n') + (failed.length > 5 ? '\n(+' + (failed.length - 5) + ' more)' : '');
+      - type: DISCARD_UNCHANGED_HEARTBEAT
+        parameters:
+        - 1h
+      timeout: '{$PBS.TIMEOUT}'
+      url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/nodes/{$PBS.NODE}/tasks'
+      query_fields:
+      - name: typefilter
+        value: backup
+      - name: errors
+        value: '1'
+      - name: limit
+        value: '{$PBS.TASKS.LIMIT}'
+      headers:
+      - name: Authorization
+        value: PBSAPIToken={$PBS.TOKEN.ID}:{$PBS.TOKEN.SECRET}
+      tags:
+      - tag: component
+        value: backup
+      triggers:
+      - uuid: 11e6b06de7874744961a3a26110bf678
+        expression: length(last(/Proxmox Backup Server by HTTP/pbs.backup.failed))>0 and left(last(/Proxmox Backup Server by HTTP/pbs.backup.failed),16)<>left(last(/Proxmox Backup Server by HTTP/pbs.backup.failed,#2),16)
+        recovery_mode: RECOVERY_EXPRESSION
+        recovery_expression: length(last(/Proxmox Backup Server by HTTP/pbs.backup.failed))=0
+        name: 'PBS: Backup failed'
+        event_name: 'PBS: Backup failed: {ITEM.LASTVALUE1}'
+        priority: HIGH
+        type: MULTIPLE
+        manual_close: 'YES'
+        description: |-
+          A backup task failed on PBS. A new problem is created for every new failure, the error text is in the problem name.
+          The problems resolve themselves when there are no failed backups during the last {$PBS.TASKS.PERIOD} hours, or can be closed manually.
+          A backup job that did not start at all is not a failed task: it is caught by the backup age triggers.
         dependencies:
         - name: 'PBS: API is unavailable'
           expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
@@ -1082,6 +1149,15 @@ zabbix_export:
     - macro: '{$PBS.GROUP.AGE.CRIT}'
       value: '50'
       description: High severity when the newest snapshot is older than N hours. Supports context.
+    - macro: '{$PBS.TASKS.INTERVAL}'
+      value: 5m
+      description: How often to check for failed backup tasks.
+    - macro: '{$PBS.TASKS.PERIOD}'
+      value: '24'
+      description: Failed backups are reported for this many hours (and the problem resolves after it).
+    - macro: '{$PBS.TASKS.LIMIT}'
+      value: '500'
+      description: Max failed backup tasks requested from the API.
     - macro: '{$PBS.JOBS.INTERVAL}'
       value: 5m
       description: How often to read sync/verify/prune/GC/tape job status.
