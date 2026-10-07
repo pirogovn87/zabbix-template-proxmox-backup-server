@@ -127,15 +127,6 @@ TLS-сертификат не проверяется, поэтому станд�
 - У отмонтированного съёмного датастора в Zabbix будет ошибка LLD на поиске namespace. Это нормально:
   проблему сообщает триггер `Datastore reports an error`.
 
-## Пересборка шаблона
-
-YAML генерируется скриптом [`tools/gen_template.py`](tools/gen_template.py) (Python 3 + PyYAML).
-Правь генератор, а не YAML:
-
-```bash
-python3 tools/gen_template.py template_pbs_http.yaml
-```
-
 ## Благодарности
 
 Шаблон создан с помощью [Claude Code](https://claude.com/claude-code) (Anthropic).
