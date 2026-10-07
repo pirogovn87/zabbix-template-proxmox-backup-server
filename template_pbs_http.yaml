@@ -538,6 +538,13 @@ zabbix_export:
           });
 
           failed.sort(function (a, b) { return b.starttime - a.starttime; });
+          cats.forEach(function (c) {
+              var list = failed.filter(function (t) { return c === 'all' || category(String(t.worker_type || '')) === c; });
+              out[c].failed = list.slice(0, 5).map(function (t) {
+                  var line = t.worker_type + ' ' + (t.worker_id || '-') + ': ' + t.status;
+                  return line.length > 200 ? line.substring(0, 197) + '...' : line;
+              }).join('; ') + (list.length > 5 ? '; +' + (list.length - 5) + ' more' : '');
+          });
           out.failed = failed.length ? failed.slice(0, 30).map(function (t) {
               return fmt(t.starttime) + ' ' + t.worker_type + ' ' + (t.worker_id || '-') + ': ' + t.status;
           }).join('\n') : 'none';
@@ -670,17 +677,6 @@ zabbix_export:
         value: tasks
       - tag: task
         value: backup
-      triggers:
-      - uuid: 929448507217499dbc6eba3fb13fc314
-        expression: last(/Proxmox Backup Server by HTTP/pbs.tasks.count[backup,error])>0
-        name: 'PBS: Backup tasks failed in the last {$PBS.TASKS.PERIOD}h'
-        priority: HIGH
-        opdata: 'Failed: {ITEM.LASTVALUE1}'
-        manual_close: 'YES'
-        description: 'There are failed tasks of category "backup" during the last {$PBS.TASKS.PERIOD} hours. See item "PBS: Failed tasks list" for details. The problem resolves itself when the failed tasks age out of the period, or can be closed manually.'
-        dependencies:
-        - name: 'PBS: API is unavailable'
-          expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
     - uuid: bc0b5797a7284f049ef9fe7440149c0c
       name: 'PBS: Restore tasks OK (period)'
       type: DEPENDENT
@@ -732,17 +728,6 @@ zabbix_export:
         value: tasks
       - tag: task
         value: restore
-      triggers:
-      - uuid: f0c92f84a231444ca8e01321bde27601
-        expression: last(/Proxmox Backup Server by HTTP/pbs.tasks.count[restore,error])>0
-        name: 'PBS: Restore tasks failed in the last {$PBS.TASKS.PERIOD}h'
-        priority: AVERAGE
-        opdata: 'Failed: {ITEM.LASTVALUE1}'
-        manual_close: 'YES'
-        description: 'There are failed tasks of category "restore" during the last {$PBS.TASKS.PERIOD} hours. See item "PBS: Failed tasks list" for details. The problem resolves itself when the failed tasks age out of the period, or can be closed manually.'
-        dependencies:
-        - name: 'PBS: API is unavailable'
-          expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
     - uuid: 5b58cbe9dfb74a78b6234c2f7c5f6231
       name: 'PBS: Sync tasks OK (period)'
       type: DEPENDENT
@@ -1049,17 +1034,72 @@ zabbix_export:
         value: tasks
       - tag: task
         value: other
-      triggers:
-      - uuid: 9e5e72e555804287b2b5a9ba565eadb9
-        expression: last(/Proxmox Backup Server by HTTP/pbs.tasks.count[other,error])>0
-        name: 'PBS: Other tasks failed in the last {$PBS.TASKS.PERIOD}h'
-        priority: WARNING
-        opdata: 'Failed: {ITEM.LASTVALUE1}'
-        manual_close: 'YES'
-        description: 'There are failed tasks of category "other" during the last {$PBS.TASKS.PERIOD} hours. See item "PBS: Failed tasks list" for details. The problem resolves itself when the failed tasks age out of the period, or can be closed manually.'
-        dependencies:
-        - name: 'PBS: API is unavailable'
-          expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
+    - uuid: d3ac027c57c14baa8199e9282757aae8
+      name: 'PBS: Backup tasks failed: list (period)'
+      type: DEPENDENT
+      key: pbs.tasks.failed[backup]
+      delay: '0'
+      history: 7d
+      value_type: TEXT
+      description: Up to 5 most recent failed backup tasks during the last {$PBS.TASKS.PERIOD} hours (type, id, error).
+      preprocessing:
+      - type: JSONPATH
+        parameters:
+        - $.backup.failed
+      - type: DISCARD_UNCHANGED_HEARTBEAT
+        parameters:
+        - 1h
+      master_item:
+        key: pbs.tasks
+      tags:
+      - tag: component
+        value: tasks
+      - tag: task
+        value: backup
+    - uuid: 1eda827559fd4fb2ae9054af07966fda
+      name: 'PBS: Restore tasks failed: list (period)'
+      type: DEPENDENT
+      key: pbs.tasks.failed[restore]
+      delay: '0'
+      history: 7d
+      value_type: TEXT
+      description: Up to 5 most recent failed restore tasks during the last {$PBS.TASKS.PERIOD} hours (type, id, error).
+      preprocessing:
+      - type: JSONPATH
+        parameters:
+        - $.restore.failed
+      - type: DISCARD_UNCHANGED_HEARTBEAT
+        parameters:
+        - 1h
+      master_item:
+        key: pbs.tasks
+      tags:
+      - tag: component
+        value: tasks
+      - tag: task
+        value: restore
+    - uuid: 0c0e97172af743ef9f3cd16247860545
+      name: 'PBS: Other tasks failed: list (period)'
+      type: DEPENDENT
+      key: pbs.tasks.failed[other]
+      delay: '0'
+      history: 7d
+      value_type: TEXT
+      description: Up to 5 most recent failed other tasks during the last {$PBS.TASKS.PERIOD} hours (type, id, error).
+      preprocessing:
+      - type: JSONPATH
+        parameters:
+        - $.other.failed
+      - type: DISCARD_UNCHANGED_HEARTBEAT
+        parameters:
+        - 1h
+      master_item:
+        key: pbs.tasks
+      tags:
+      - tag: component
+        value: tasks
+      - tag: task
+        value: other
     - uuid: 4d2128d6623a472c873b3f3fb137fffd
       name: 'PBS: Failed tasks list'
       type: DEPENDENT
@@ -1221,11 +1261,31 @@ zabbix_export:
               return 2;
           }
 
+          var kind = 'sync';
+          // Human-readable job name: datastore[/namespace], plus comment if set.
+          // Job IDs of prune / verify / sync jobs are auto-generated (default-<store>-<uuid>).
+          function path(store, ns) { return (store || '') + (ns ? '/' + ns : ''); }
+          function label(j) {
+              var n;
+              if (kind === 'sync') {
+                  var local = path(j.store, j.ns);
+                  var remote = (j.remote ? j.remote + ':' : '') + path(j['remote-store'], j['remote-ns']);
+                  n = j['sync-direction'] === 'push' ? local + ' -> ' + remote : remote + ' -> ' + local;
+              } else if (kind === 'tape') {
+                  n = String(j.id) + ' (' + (j.store || '') + ' -> ' + (j.pool || '') + ')';
+              } else {
+                  n = path(j.store || j.id, j.ns);
+              }
+              if (j.comment) n += ' - ' + j.comment;
+              return n;
+          }
+
           var now = Math.floor(Date.now() / 1000);
-          return JSON.stringify((JSON.parse(value).data || []).map(function (j) {
+          var jobs = (JSON.parse(value).data || []).map(function (j) {
               var state = j['last-run-state'], upid = j['last-run-upid'] || j.upid;
               return {
                   id: String(j.id || j.store),
+                  name: label(j),
                   store: j.store || '',
                   remote: j.remote ? j.remote + ':' + (j['remote-store'] || '') : '',
                   schedule: j.schedule || '',
@@ -1238,7 +1298,11 @@ zabbix_export:
                   pending: j['pending-bytes'],
                   removed: j['removed-bytes']
               };
-          }));
+          });
+          var seen = {};
+          jobs.forEach(function (j) { seen[j.name] = (seen[j.name] || 0) + 1; });
+          jobs.forEach(function (j) { if (seen[j.name] > 1) j.name += ' [' + j.id + ']'; });
+          return JSON.stringify(jobs);
       timeout: '{$PBS.TIMEOUT}'
       url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/admin/sync'
       headers: *id001
@@ -1268,11 +1332,31 @@ zabbix_export:
               return 2;
           }
 
+          var kind = 'verify';
+          // Human-readable job name: datastore[/namespace], plus comment if set.
+          // Job IDs of prune / verify / sync jobs are auto-generated (default-<store>-<uuid>).
+          function path(store, ns) { return (store || '') + (ns ? '/' + ns : ''); }
+          function label(j) {
+              var n;
+              if (kind === 'sync') {
+                  var local = path(j.store, j.ns);
+                  var remote = (j.remote ? j.remote + ':' : '') + path(j['remote-store'], j['remote-ns']);
+                  n = j['sync-direction'] === 'push' ? local + ' -> ' + remote : remote + ' -> ' + local;
+              } else if (kind === 'tape') {
+                  n = String(j.id) + ' (' + (j.store || '') + ' -> ' + (j.pool || '') + ')';
+              } else {
+                  n = path(j.store || j.id, j.ns);
+              }
+              if (j.comment) n += ' - ' + j.comment;
+              return n;
+          }
+
           var now = Math.floor(Date.now() / 1000);
-          return JSON.stringify((JSON.parse(value).data || []).map(function (j) {
+          var jobs = (JSON.parse(value).data || []).map(function (j) {
               var state = j['last-run-state'], upid = j['last-run-upid'] || j.upid;
               return {
                   id: String(j.id || j.store),
+                  name: label(j),
                   store: j.store || '',
                   remote: j.remote ? j.remote + ':' + (j['remote-store'] || '') : '',
                   schedule: j.schedule || '',
@@ -1285,7 +1369,11 @@ zabbix_export:
                   pending: j['pending-bytes'],
                   removed: j['removed-bytes']
               };
-          }));
+          });
+          var seen = {};
+          jobs.forEach(function (j) { seen[j.name] = (seen[j.name] || 0) + 1; });
+          jobs.forEach(function (j) { if (seen[j.name] > 1) j.name += ' [' + j.id + ']'; });
+          return JSON.stringify(jobs);
       timeout: '{$PBS.TIMEOUT}'
       url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/admin/verify'
       headers: *id001
@@ -1315,11 +1403,31 @@ zabbix_export:
               return 2;
           }
 
+          var kind = 'prune';
+          // Human-readable job name: datastore[/namespace], plus comment if set.
+          // Job IDs of prune / verify / sync jobs are auto-generated (default-<store>-<uuid>).
+          function path(store, ns) { return (store || '') + (ns ? '/' + ns : ''); }
+          function label(j) {
+              var n;
+              if (kind === 'sync') {
+                  var local = path(j.store, j.ns);
+                  var remote = (j.remote ? j.remote + ':' : '') + path(j['remote-store'], j['remote-ns']);
+                  n = j['sync-direction'] === 'push' ? local + ' -> ' + remote : remote + ' -> ' + local;
+              } else if (kind === 'tape') {
+                  n = String(j.id) + ' (' + (j.store || '') + ' -> ' + (j.pool || '') + ')';
+              } else {
+                  n = path(j.store || j.id, j.ns);
+              }
+              if (j.comment) n += ' - ' + j.comment;
+              return n;
+          }
+
           var now = Math.floor(Date.now() / 1000);
-          return JSON.stringify((JSON.parse(value).data || []).map(function (j) {
+          var jobs = (JSON.parse(value).data || []).map(function (j) {
               var state = j['last-run-state'], upid = j['last-run-upid'] || j.upid;
               return {
                   id: String(j.id || j.store),
+                  name: label(j),
                   store: j.store || '',
                   remote: j.remote ? j.remote + ':' + (j['remote-store'] || '') : '',
                   schedule: j.schedule || '',
@@ -1332,7 +1440,11 @@ zabbix_export:
                   pending: j['pending-bytes'],
                   removed: j['removed-bytes']
               };
-          }));
+          });
+          var seen = {};
+          jobs.forEach(function (j) { seen[j.name] = (seen[j.name] || 0) + 1; });
+          jobs.forEach(function (j) { if (seen[j.name] > 1) j.name += ' [' + j.id + ']'; });
+          return JSON.stringify(jobs);
       timeout: '{$PBS.TIMEOUT}'
       url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/admin/prune'
       headers: *id001
@@ -1362,11 +1474,31 @@ zabbix_export:
               return 2;
           }
 
+          var kind = 'gc';
+          // Human-readable job name: datastore[/namespace], plus comment if set.
+          // Job IDs of prune / verify / sync jobs are auto-generated (default-<store>-<uuid>).
+          function path(store, ns) { return (store || '') + (ns ? '/' + ns : ''); }
+          function label(j) {
+              var n;
+              if (kind === 'sync') {
+                  var local = path(j.store, j.ns);
+                  var remote = (j.remote ? j.remote + ':' : '') + path(j['remote-store'], j['remote-ns']);
+                  n = j['sync-direction'] === 'push' ? local + ' -> ' + remote : remote + ' -> ' + local;
+              } else if (kind === 'tape') {
+                  n = String(j.id) + ' (' + (j.store || '') + ' -> ' + (j.pool || '') + ')';
+              } else {
+                  n = path(j.store || j.id, j.ns);
+              }
+              if (j.comment) n += ' - ' + j.comment;
+              return n;
+          }
+
           var now = Math.floor(Date.now() / 1000);
-          return JSON.stringify((JSON.parse(value).data || []).map(function (j) {
+          var jobs = (JSON.parse(value).data || []).map(function (j) {
               var state = j['last-run-state'], upid = j['last-run-upid'] || j.upid;
               return {
                   id: String(j.id || j.store),
+                  name: label(j),
                   store: j.store || '',
                   remote: j.remote ? j.remote + ':' + (j['remote-store'] || '') : '',
                   schedule: j.schedule || '',
@@ -1379,7 +1511,11 @@ zabbix_export:
                   pending: j['pending-bytes'],
                   removed: j['removed-bytes']
               };
-          }));
+          });
+          var seen = {};
+          jobs.forEach(function (j) { seen[j.name] = (seen[j.name] || 0) + 1; });
+          jobs.forEach(function (j) { if (seen[j.name] > 1) j.name += ' [' + j.id + ']'; });
+          return JSON.stringify(jobs);
       timeout: '{$PBS.TIMEOUT}'
       url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/admin/gc'
       headers: *id001
@@ -1409,11 +1545,31 @@ zabbix_export:
               return 2;
           }
 
+          var kind = 'tape';
+          // Human-readable job name: datastore[/namespace], plus comment if set.
+          // Job IDs of prune / verify / sync jobs are auto-generated (default-<store>-<uuid>).
+          function path(store, ns) { return (store || '') + (ns ? '/' + ns : ''); }
+          function label(j) {
+              var n;
+              if (kind === 'sync') {
+                  var local = path(j.store, j.ns);
+                  var remote = (j.remote ? j.remote + ':' : '') + path(j['remote-store'], j['remote-ns']);
+                  n = j['sync-direction'] === 'push' ? local + ' -> ' + remote : remote + ' -> ' + local;
+              } else if (kind === 'tape') {
+                  n = String(j.id) + ' (' + (j.store || '') + ' -> ' + (j.pool || '') + ')';
+              } else {
+                  n = path(j.store || j.id, j.ns);
+              }
+              if (j.comment) n += ' - ' + j.comment;
+              return n;
+          }
+
           var now = Math.floor(Date.now() / 1000);
-          return JSON.stringify((JSON.parse(value).data || []).map(function (j) {
+          var jobs = (JSON.parse(value).data || []).map(function (j) {
               var state = j['last-run-state'], upid = j['last-run-upid'] || j.upid;
               return {
                   id: String(j.id || j.store),
+                  name: label(j),
                   store: j.store || '',
                   remote: j.remote ? j.remote + ':' + (j['remote-store'] || '') : '',
                   schedule: j.schedule || '',
@@ -1426,7 +1582,11 @@ zabbix_export:
                   pending: j['pending-bytes'],
                   removed: j['removed-bytes']
               };
-          }));
+          });
+          var seen = {};
+          jobs.forEach(function (j) { seen[j.name] = (seen[j.name] || 0) + 1; });
+          jobs.forEach(function (j) { if (seen[j.name] > 1) j.name += ' [' + j.id + ']'; });
+          return JSON.stringify(jobs);
       timeout: '{$PBS.TIMEOUT}'
       url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/tape/backup'
       headers: *id001
@@ -1893,7 +2053,7 @@ zabbix_export:
       description: Discovers configured sync jobs.
       item_prototypes:
       - uuid: 61f9579d7e7a433f8b5b93470f41aba5
-        name: 'PBS: Sync job [{#JOB.ID}]: Last run state'
+        name: 'PBS: Sync job [{#JOB.NAME}]: Last run state'
         type: DEPENDENT
         key: pbs.job.state[sync,"{#JOB.ID}"]
         delay: '0'
@@ -1918,29 +2078,29 @@ zabbix_export:
           value: sync
         - &id006
           tag: job
-          value: '{#JOB.ID}'
+          value: '{#JOB.NAME}'
         trigger_prototypes:
         - uuid: eb9b10818eca486c83c69b027212ff97
           expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[sync,"{#JOB.ID}"])=2
-          name: 'PBS: Sync job [{#JOB.ID}]: Last run failed'
+          name: 'PBS: Sync job [{#JOB.NAME}]: Last run failed'
           priority: AVERAGE
           opdata: '{ITEM.LASTVALUE1}'
-          description: 'The last run of the sync job ended with an error. Error text is in item "Sync job [{#JOB.ID}]: Last run result".'
+          description: 'The last run of the sync job ended with an error. Error text is in item "Sync job [{#JOB.NAME}]: Last run result".'
           dependencies:
           - name: 'PBS: API is unavailable'
             expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
         - uuid: 5ba1638983a6476b9d3da2599d6f61fa
           expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[sync,"{#JOB.ID}"])=1
-          name: 'PBS: Sync job [{#JOB.ID}]: Last run finished with warnings'
+          name: 'PBS: Sync job [{#JOB.NAME}]: Last run finished with warnings'
           priority: WARNING
           description: The last run of the sync job finished with warnings.
           dependencies:
           - name: 'PBS: API is unavailable'
             expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-          - name: 'PBS: Sync job [{#JOB.ID}]: Last run failed'
+          - name: 'PBS: Sync job [{#JOB.NAME}]: Last run failed'
             expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[sync,"{#JOB.ID}"])=2
       - uuid: f1b9871460d14ec28132e90ef9554011
-        name: 'PBS: Sync job [{#JOB.ID}]: Last run result'
+        name: 'PBS: Sync job [{#JOB.NAME}]: Last run result'
         type: DEPENDENT
         key: pbs.job.result[sync,"{#JOB.ID}"]
         delay: '0'
@@ -1965,7 +2125,7 @@ zabbix_export:
         - *id005
         - *id006
       - uuid: 117fcff75fa843cfbd50294429106dc2
-        name: 'PBS: Sync job [{#JOB.ID}]: Last run end'
+        name: 'PBS: Sync job [{#JOB.NAME}]: Last run end'
         type: DEPENDENT
         key: pbs.job.last[sync,"{#JOB.ID}"]
         delay: '0'
@@ -1988,7 +2148,7 @@ zabbix_export:
         trigger_prototypes:
         - uuid: 76b3b9846b1d4d91a3b621d62e858bba
           expression: last(/Proxmox Backup Server by HTTP/pbs.job.next[sync,"{#JOB.ID}"])>0 and last(/Proxmox Backup Server by HTTP/pbs.job.last[sync,"{#JOB.ID}"])>0 and (now()-last(/Proxmox Backup Server by HTTP/pbs.job.last[sync,"{#JOB.ID}"]))/3600>{$PBS.JOB.MAX.AGE:"sync"}
-          name: 'PBS: Sync job [{#JOB.ID}]: Has not run for more than {$PBS.JOB.MAX.AGE:"sync"}h'
+          name: 'PBS: Sync job [{#JOB.NAME}]: Has not run for more than {$PBS.JOB.MAX.AGE:"sync"}h'
           priority: WARNING
           opdata: 'Last run: {ITEM.LASTVALUE2}'
           description: The job is scheduled, but its last run is too old. Check that the schedule is correct and that the job is not stuck.
@@ -1996,7 +2156,7 @@ zabbix_export:
           - name: 'PBS: API is unavailable'
             expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
       - uuid: 6fba72beb84e4379a73e93240f70b79f
-        name: 'PBS: Sync job [{#JOB.ID}]: Next run'
+        name: 'PBS: Sync job [{#JOB.NAME}]: Next run'
         type: DEPENDENT
         key: pbs.job.next[sync,"{#JOB.ID}"]
         delay: '0'
@@ -2021,6 +2181,8 @@ zabbix_export:
       lld_macro_paths:
       - lld_macro: '{#JOB.ID}'
         path: $.id
+      - lld_macro: '{#JOB.NAME}'
+        path: $.name
       - lld_macro: '{#JOB.STORE}'
         path: $.store
       - lld_macro: '{#JOB.SCHEDULE}'
@@ -2048,7 +2210,7 @@ zabbix_export:
       description: Discovers configured verify jobs.
       item_prototypes:
       - uuid: ef39c6bf1a1d47eea27c28a3236e6e2b
-        name: 'PBS: Verify job [{#JOB.ID}]: Last run state'
+        name: 'PBS: Verify job [{#JOB.NAME}]: Last run state'
         type: DEPENDENT
         key: pbs.job.state[verify,"{#JOB.ID}"]
         delay: '0'
@@ -2073,29 +2235,29 @@ zabbix_export:
           value: verify
         - &id008
           tag: job
-          value: '{#JOB.ID}'
+          value: '{#JOB.NAME}'
         trigger_prototypes:
         - uuid: ae8e5ab01b9740119c10993ba60fdc19
           expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[verify,"{#JOB.ID}"])=2
-          name: 'PBS: Verify job [{#JOB.ID}]: Last run failed'
+          name: 'PBS: Verify job [{#JOB.NAME}]: Last run failed'
           priority: HIGH
           opdata: '{ITEM.LASTVALUE1}'
-          description: 'The last run of the verify job ended with an error. Error text is in item "Verify job [{#JOB.ID}]: Last run result".'
+          description: 'The last run of the verify job ended with an error. Error text is in item "Verify job [{#JOB.NAME}]: Last run result".'
           dependencies:
           - name: 'PBS: API is unavailable'
             expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
         - uuid: 221177f702bf49b0a8b54cfb9124561b
           expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[verify,"{#JOB.ID}"])=1
-          name: 'PBS: Verify job [{#JOB.ID}]: Last run finished with warnings'
+          name: 'PBS: Verify job [{#JOB.NAME}]: Last run finished with warnings'
           priority: WARNING
           description: The last run of the verify job finished with warnings.
           dependencies:
           - name: 'PBS: API is unavailable'
             expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-          - name: 'PBS: Verify job [{#JOB.ID}]: Last run failed'
+          - name: 'PBS: Verify job [{#JOB.NAME}]: Last run failed'
             expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[verify,"{#JOB.ID}"])=2
       - uuid: fc05fac389704a80bf02149980f6c744
-        name: 'PBS: Verify job [{#JOB.ID}]: Last run result'
+        name: 'PBS: Verify job [{#JOB.NAME}]: Last run result'
         type: DEPENDENT
         key: pbs.job.result[verify,"{#JOB.ID}"]
         delay: '0'
@@ -2120,7 +2282,7 @@ zabbix_export:
         - *id007
         - *id008
       - uuid: 07a3e7bf9c5145d2b93f7d886ee6df28
-        name: 'PBS: Verify job [{#JOB.ID}]: Last run end'
+        name: 'PBS: Verify job [{#JOB.NAME}]: Last run end'
         type: DEPENDENT
         key: pbs.job.last[verify,"{#JOB.ID}"]
         delay: '0'
@@ -2143,7 +2305,7 @@ zabbix_export:
         trigger_prototypes:
         - uuid: d000462ef70247cdba51626f375d38b7
           expression: last(/Proxmox Backup Server by HTTP/pbs.job.next[verify,"{#JOB.ID}"])>0 and last(/Proxmox Backup Server by HTTP/pbs.job.last[verify,"{#JOB.ID}"])>0 and (now()-last(/Proxmox Backup Server by HTTP/pbs.job.last[verify,"{#JOB.ID}"]))/3600>{$PBS.JOB.MAX.AGE:"verify"}
-          name: 'PBS: Verify job [{#JOB.ID}]: Has not run for more than {$PBS.JOB.MAX.AGE:"verify"}h'
+          name: 'PBS: Verify job [{#JOB.NAME}]: Has not run for more than {$PBS.JOB.MAX.AGE:"verify"}h'
           priority: WARNING
           opdata: 'Last run: {ITEM.LASTVALUE2}'
           description: The job is scheduled, but its last run is too old. Check that the schedule is correct and that the job is not stuck.
@@ -2151,7 +2313,7 @@ zabbix_export:
           - name: 'PBS: API is unavailable'
             expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
       - uuid: 6d7e0a2c917945aab2a3b215f308b6d7
-        name: 'PBS: Verify job [{#JOB.ID}]: Next run'
+        name: 'PBS: Verify job [{#JOB.NAME}]: Next run'
         type: DEPENDENT
         key: pbs.job.next[verify,"{#JOB.ID}"]
         delay: '0'
@@ -2176,6 +2338,8 @@ zabbix_export:
       lld_macro_paths:
       - lld_macro: '{#JOB.ID}'
         path: $.id
+      - lld_macro: '{#JOB.NAME}'
+        path: $.name
       - lld_macro: '{#JOB.STORE}'
         path: $.store
       - lld_macro: '{#JOB.SCHEDULE}'
@@ -2203,7 +2367,7 @@ zabbix_export:
       description: Discovers configured prune jobs.
       item_prototypes:
       - uuid: 8877cd5065094b24a0b28d224e71a972
-        name: 'PBS: Prune job [{#JOB.ID}]: Last run state'
+        name: 'PBS: Prune job [{#JOB.NAME}]: Last run state'
         type: DEPENDENT
         key: pbs.job.state[prune,"{#JOB.ID}"]
         delay: '0'
@@ -2228,29 +2392,29 @@ zabbix_export:
           value: prune
         - &id010
           tag: job
-          value: '{#JOB.ID}'
+          value: '{#JOB.NAME}'
         trigger_prototypes:
         - uuid: 5f43991d72f54c9c84e598109523283d
           expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[prune,"{#JOB.ID}"])=2
-          name: 'PBS: Prune job [{#JOB.ID}]: Last run failed'
+          name: 'PBS: Prune job [{#JOB.NAME}]: Last run failed'
           priority: AVERAGE
           opdata: '{ITEM.LASTVALUE1}'
-          description: 'The last run of the prune job ended with an error. Error text is in item "Prune job [{#JOB.ID}]: Last run result".'
+          description: 'The last run of the prune job ended with an error. Error text is in item "Prune job [{#JOB.NAME}]: Last run result".'
           dependencies:
           - name: 'PBS: API is unavailable'
             expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
         - uuid: cb7dea4363ff47fa88e3e541f0300d73
           expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[prune,"{#JOB.ID}"])=1
-          name: 'PBS: Prune job [{#JOB.ID}]: Last run finished with warnings'
+          name: 'PBS: Prune job [{#JOB.NAME}]: Last run finished with warnings'
           priority: WARNING
           description: The last run of the prune job finished with warnings.
           dependencies:
           - name: 'PBS: API is unavailable'
             expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-          - name: 'PBS: Prune job [{#JOB.ID}]: Last run failed'
+          - name: 'PBS: Prune job [{#JOB.NAME}]: Last run failed'
             expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[prune,"{#JOB.ID}"])=2
       - uuid: 3ac8ceb60ba84c8197debc1c95688dc1
-        name: 'PBS: Prune job [{#JOB.ID}]: Last run result'
+        name: 'PBS: Prune job [{#JOB.NAME}]: Last run result'
         type: DEPENDENT
         key: pbs.job.result[prune,"{#JOB.ID}"]
         delay: '0'
@@ -2275,7 +2439,7 @@ zabbix_export:
         - *id009
         - *id010
       - uuid: b32aaa2865774945a55a8e64c89d2877
-        name: 'PBS: Prune job [{#JOB.ID}]: Last run end'
+        name: 'PBS: Prune job [{#JOB.NAME}]: Last run end'
         type: DEPENDENT
         key: pbs.job.last[prune,"{#JOB.ID}"]
         delay: '0'
@@ -2298,7 +2462,7 @@ zabbix_export:
         trigger_prototypes:
         - uuid: be7197adc3984e1198956869785877f1
           expression: last(/Proxmox Backup Server by HTTP/pbs.job.next[prune,"{#JOB.ID}"])>0 and last(/Proxmox Backup Server by HTTP/pbs.job.last[prune,"{#JOB.ID}"])>0 and (now()-last(/Proxmox Backup Server by HTTP/pbs.job.last[prune,"{#JOB.ID}"]))/3600>{$PBS.JOB.MAX.AGE:"prune"}
-          name: 'PBS: Prune job [{#JOB.ID}]: Has not run for more than {$PBS.JOB.MAX.AGE:"prune"}h'
+          name: 'PBS: Prune job [{#JOB.NAME}]: Has not run for more than {$PBS.JOB.MAX.AGE:"prune"}h'
           priority: WARNING
           opdata: 'Last run: {ITEM.LASTVALUE2}'
           description: The job is scheduled, but its last run is too old. Check that the schedule is correct and that the job is not stuck.
@@ -2306,7 +2470,7 @@ zabbix_export:
           - name: 'PBS: API is unavailable'
             expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
       - uuid: d9715b235a524dedb40889c29602b94a
-        name: 'PBS: Prune job [{#JOB.ID}]: Next run'
+        name: 'PBS: Prune job [{#JOB.NAME}]: Next run'
         type: DEPENDENT
         key: pbs.job.next[prune,"{#JOB.ID}"]
         delay: '0'
@@ -2331,6 +2495,8 @@ zabbix_export:
       lld_macro_paths:
       - lld_macro: '{#JOB.ID}'
         path: $.id
+      - lld_macro: '{#JOB.NAME}'
+        path: $.name
       - lld_macro: '{#JOB.STORE}'
         path: $.store
       - lld_macro: '{#JOB.SCHEDULE}'
@@ -2358,7 +2524,7 @@ zabbix_export:
       description: Discovers configured garbage collections.
       item_prototypes:
       - uuid: fc9a055049f94ed888175f4783048443
-        name: 'PBS: Garbage collection [{#JOB.ID}]: Last run state'
+        name: 'PBS: Garbage collection [{#JOB.NAME}]: Last run state'
         type: DEPENDENT
         key: pbs.job.state[gc,"{#JOB.ID}"]
         delay: '0'
@@ -2383,29 +2549,29 @@ zabbix_export:
           value: gc
         - &id012
           tag: job
-          value: '{#JOB.ID}'
+          value: '{#JOB.NAME}'
         trigger_prototypes:
         - uuid: 4c4875916a9844798917a883e2ad4a58
           expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[gc,"{#JOB.ID}"])=2
-          name: 'PBS: Garbage collection [{#JOB.ID}]: Last run failed'
+          name: 'PBS: Garbage collection [{#JOB.NAME}]: Last run failed'
           priority: AVERAGE
           opdata: '{ITEM.LASTVALUE1}'
-          description: 'The last run of the garbage collection ended with an error. Error text is in item "Garbage collection [{#JOB.ID}]: Last run result".'
+          description: 'The last run of the garbage collection ended with an error. Error text is in item "Garbage collection [{#JOB.NAME}]: Last run result".'
           dependencies:
           - name: 'PBS: API is unavailable'
             expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
         - uuid: 1dd73394879d46069ae5a1c6fa37ee37
           expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[gc,"{#JOB.ID}"])=1
-          name: 'PBS: Garbage collection [{#JOB.ID}]: Last run finished with warnings'
+          name: 'PBS: Garbage collection [{#JOB.NAME}]: Last run finished with warnings'
           priority: WARNING
           description: The last run of the garbage collection finished with warnings.
           dependencies:
           - name: 'PBS: API is unavailable'
             expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-          - name: 'PBS: Garbage collection [{#JOB.ID}]: Last run failed'
+          - name: 'PBS: Garbage collection [{#JOB.NAME}]: Last run failed'
             expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[gc,"{#JOB.ID}"])=2
       - uuid: 99ff9ce16ce34b5b93c69cee0c90762a
-        name: 'PBS: Garbage collection [{#JOB.ID}]: Last run result'
+        name: 'PBS: Garbage collection [{#JOB.NAME}]: Last run result'
         type: DEPENDENT
         key: pbs.job.result[gc,"{#JOB.ID}"]
         delay: '0'
@@ -2430,7 +2596,7 @@ zabbix_export:
         - *id011
         - *id012
       - uuid: 63260a6a7c7f4a7299c43aa43f4b5a3f
-        name: 'PBS: Garbage collection [{#JOB.ID}]: Last run end'
+        name: 'PBS: Garbage collection [{#JOB.NAME}]: Last run end'
         type: DEPENDENT
         key: pbs.job.last[gc,"{#JOB.ID}"]
         delay: '0'
@@ -2453,7 +2619,7 @@ zabbix_export:
         trigger_prototypes:
         - uuid: aa49e5b590474339b0fd532a5817eca5
           expression: last(/Proxmox Backup Server by HTTP/pbs.job.next[gc,"{#JOB.ID}"])>0 and last(/Proxmox Backup Server by HTTP/pbs.job.last[gc,"{#JOB.ID}"])>0 and (now()-last(/Proxmox Backup Server by HTTP/pbs.job.last[gc,"{#JOB.ID}"]))/3600>{$PBS.JOB.MAX.AGE:"gc"}
-          name: 'PBS: Garbage collection [{#JOB.ID}]: Has not run for more than {$PBS.JOB.MAX.AGE:"gc"}h'
+          name: 'PBS: Garbage collection [{#JOB.NAME}]: Has not run for more than {$PBS.JOB.MAX.AGE:"gc"}h'
           priority: WARNING
           opdata: 'Last run: {ITEM.LASTVALUE2}'
           description: The job is scheduled, but its last run is too old. Check that the schedule is correct and that the job is not stuck.
@@ -2461,7 +2627,7 @@ zabbix_export:
           - name: 'PBS: API is unavailable'
             expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
       - uuid: b159d91eea2945deb6a3ad0984505197
-        name: 'PBS: Garbage collection [{#JOB.ID}]: Next run'
+        name: 'PBS: Garbage collection [{#JOB.NAME}]: Next run'
         type: DEPENDENT
         key: pbs.job.next[gc,"{#JOB.ID}"]
         delay: '0'
@@ -2482,7 +2648,7 @@ zabbix_export:
         - *id011
         - *id012
       - uuid: 809bdd0c487a4b61a895028d1784d47b
-        name: 'PBS: Garbage collection [{#JOB.ID}]: Pending bytes'
+        name: 'PBS: Garbage collection [{#JOB.NAME}]: Pending bytes'
         type: DEPENDENT
         key: pbs.job.pending[gc,"{#JOB.ID}"]
         delay: '0'
@@ -2508,6 +2674,8 @@ zabbix_export:
       lld_macro_paths:
       - lld_macro: '{#JOB.ID}'
         path: $.id
+      - lld_macro: '{#JOB.NAME}'
+        path: $.name
       - lld_macro: '{#JOB.STORE}'
         path: $.store
       - lld_macro: '{#JOB.SCHEDULE}'
@@ -2535,7 +2703,7 @@ zabbix_export:
       description: Discovers configured tape backup jobs.
       item_prototypes:
       - uuid: cb9456b513e94f7b9455d811842252c6
-        name: 'PBS: Tape backup job [{#JOB.ID}]: Last run state'
+        name: 'PBS: Tape backup job [{#JOB.NAME}]: Last run state'
         type: DEPENDENT
         key: pbs.job.state[tape,"{#JOB.ID}"]
         delay: '0'
@@ -2560,29 +2728,29 @@ zabbix_export:
           value: tape
         - &id014
           tag: job
-          value: '{#JOB.ID}'
+          value: '{#JOB.NAME}'
         trigger_prototypes:
         - uuid: c68d6f21cfd645a2803824351c8cc692
           expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[tape,"{#JOB.ID}"])=2
-          name: 'PBS: Tape backup job [{#JOB.ID}]: Last run failed'
+          name: 'PBS: Tape backup job [{#JOB.NAME}]: Last run failed'
           priority: AVERAGE
           opdata: '{ITEM.LASTVALUE1}'
-          description: 'The last run of the tape backup job ended with an error. Error text is in item "Tape backup job [{#JOB.ID}]: Last run result".'
+          description: 'The last run of the tape backup job ended with an error. Error text is in item "Tape backup job [{#JOB.NAME}]: Last run result".'
           dependencies:
           - name: 'PBS: API is unavailable'
             expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
         - uuid: 5679cbe33e724ff5b51632d9f51dbef5
           expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[tape,"{#JOB.ID}"])=1
-          name: 'PBS: Tape backup job [{#JOB.ID}]: Last run finished with warnings'
+          name: 'PBS: Tape backup job [{#JOB.NAME}]: Last run finished with warnings'
           priority: WARNING
           description: The last run of the tape backup job finished with warnings.
           dependencies:
           - name: 'PBS: API is unavailable'
             expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-          - name: 'PBS: Tape backup job [{#JOB.ID}]: Last run failed'
+          - name: 'PBS: Tape backup job [{#JOB.NAME}]: Last run failed'
             expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[tape,"{#JOB.ID}"])=2
       - uuid: afd0db38320c4088b118ac09dc1b70a3
-        name: 'PBS: Tape backup job [{#JOB.ID}]: Last run result'
+        name: 'PBS: Tape backup job [{#JOB.NAME}]: Last run result'
         type: DEPENDENT
         key: pbs.job.result[tape,"{#JOB.ID}"]
         delay: '0'
@@ -2607,7 +2775,7 @@ zabbix_export:
         - *id013
         - *id014
       - uuid: 69bcc5160a564f2ba05795a06209cb3d
-        name: 'PBS: Tape backup job [{#JOB.ID}]: Last run end'
+        name: 'PBS: Tape backup job [{#JOB.NAME}]: Last run end'
         type: DEPENDENT
         key: pbs.job.last[tape,"{#JOB.ID}"]
         delay: '0'
@@ -2630,7 +2798,7 @@ zabbix_export:
         trigger_prototypes:
         - uuid: 2d4c81ba6a3740588ce17f7f652c7efc
           expression: last(/Proxmox Backup Server by HTTP/pbs.job.next[tape,"{#JOB.ID}"])>0 and last(/Proxmox Backup Server by HTTP/pbs.job.last[tape,"{#JOB.ID}"])>0 and (now()-last(/Proxmox Backup Server by HTTP/pbs.job.last[tape,"{#JOB.ID}"]))/3600>{$PBS.JOB.MAX.AGE:"tape"}
-          name: 'PBS: Tape backup job [{#JOB.ID}]: Has not run for more than {$PBS.JOB.MAX.AGE:"tape"}h'
+          name: 'PBS: Tape backup job [{#JOB.NAME}]: Has not run for more than {$PBS.JOB.MAX.AGE:"tape"}h'
           priority: WARNING
           opdata: 'Last run: {ITEM.LASTVALUE2}'
           description: The job is scheduled, but its last run is too old. Check that the schedule is correct and that the job is not stuck.
@@ -2638,7 +2806,7 @@ zabbix_export:
           - name: 'PBS: API is unavailable'
             expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
       - uuid: 2d3a83f19e7a4d03bc4ecce0fea4a68c
-        name: 'PBS: Tape backup job [{#JOB.ID}]: Next run'
+        name: 'PBS: Tape backup job [{#JOB.NAME}]: Next run'
         type: DEPENDENT
         key: pbs.job.next[tape,"{#JOB.ID}"]
         delay: '0'
@@ -2663,6 +2831,8 @@ zabbix_export:
       lld_macro_paths:
       - lld_macro: '{#JOB.ID}'
         path: $.id
+      - lld_macro: '{#JOB.NAME}'
+        path: $.name
       - lld_macro: '{#JOB.STORE}'
         path: $.store
       - lld_macro: '{#JOB.SCHEDULE}'
@@ -3100,6 +3270,54 @@ zabbix_export:
       - value: '2'
         newvalue: Unknown
   triggers:
+  - uuid: 929448507217499dbc6eba3fb13fc314
+    expression: 'last(/Proxmox Backup Server by HTTP/pbs.tasks.count[backup,error])>0 and length(last(/Proxmox Backup Server by HTTP/pbs.tasks.failed[backup]))>0'
+    name: 'PBS: Backup tasks failed in the last {$PBS.TASKS.PERIOD}h'
+    event_name: 'PBS: Backup tasks failed in the last {$PBS.TASKS.PERIOD}h ({ITEM.LASTVALUE1}): {ITEM.LASTVALUE2}'
+    opdata: '{ITEM.LASTVALUE2}'
+    priority: HIGH
+    manual_close: 'YES'
+    description: 'There are failed tasks of category "backup" during the last {$PBS.TASKS.PERIOD} hours. The most recent of them are shown in the problem name and operational data; the full list is in item "PBS: Failed tasks list". The problem resolves itself when the failed tasks age out of the period, or can be closed manually.'
+    dependencies:
+    - name: 'PBS: API is unavailable'
+      expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
+    tags:
+    - tag: component
+      value: tasks
+    - tag: task
+      value: backup
+  - uuid: f0c92f84a231444ca8e01321bde27601
+    expression: 'last(/Proxmox Backup Server by HTTP/pbs.tasks.count[restore,error])>0 and length(last(/Proxmox Backup Server by HTTP/pbs.tasks.failed[restore]))>0'
+    name: 'PBS: Restore tasks failed in the last {$PBS.TASKS.PERIOD}h'
+    event_name: 'PBS: Restore tasks failed in the last {$PBS.TASKS.PERIOD}h ({ITEM.LASTVALUE1}): {ITEM.LASTVALUE2}'
+    opdata: '{ITEM.LASTVALUE2}'
+    priority: AVERAGE
+    manual_close: 'YES'
+    description: 'There are failed tasks of category "restore" during the last {$PBS.TASKS.PERIOD} hours. The most recent of them are shown in the problem name and operational data; the full list is in item "PBS: Failed tasks list". The problem resolves itself when the failed tasks age out of the period, or can be closed manually.'
+    dependencies:
+    - name: 'PBS: API is unavailable'
+      expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
+    tags:
+    - tag: component
+      value: tasks
+    - tag: task
+      value: restore
+  - uuid: 9e5e72e555804287b2b5a9ba565eadb9
+    expression: 'last(/Proxmox Backup Server by HTTP/pbs.tasks.count[other,error])>0 and length(last(/Proxmox Backup Server by HTTP/pbs.tasks.failed[other]))>0'
+    name: 'PBS: Other tasks failed in the last {$PBS.TASKS.PERIOD}h'
+    event_name: 'PBS: Other tasks failed in the last {$PBS.TASKS.PERIOD}h ({ITEM.LASTVALUE1}): {ITEM.LASTVALUE2}'
+    opdata: '{ITEM.LASTVALUE2}'
+    priority: WARNING
+    manual_close: 'YES'
+    description: 'There are failed tasks of category "other" during the last {$PBS.TASKS.PERIOD} hours. The most recent of them are shown in the problem name and operational data; the full list is in item "PBS: Failed tasks list". The problem resolves itself when the failed tasks age out of the period, or can be closed manually.'
+    dependencies:
+    - name: 'PBS: API is unavailable'
+      expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
+    tags:
+    - tag: component
+      value: tasks
+    - tag: task
+      value: other
   - uuid: 1df89434eb85454d92f777e2cd9d2080
     expression: min(/Proxmox Backup Server by HTTP/pbs.load[avg1],5m)/last(/Proxmox Backup Server by HTTP/pbs.cpu.num)>{$PBS.LOAD.PER.CPU.MAX} and last(/Proxmox Backup Server by HTTP/pbs.load[avg5])>0 and last(/Proxmox Backup Server by HTTP/pbs.load[avg15])>=0
     name: 'PBS: Load average is too high (per CPU load over {$PBS.LOAD.PER.CPU.MAX} for 5m)'
