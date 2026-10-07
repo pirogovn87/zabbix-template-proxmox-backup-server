@@ -9,15 +9,15 @@ zabbix_export:
     name: Proxmox Backup Server by HTTP
     description: |
       Proxmox Backup Server 4.x monitoring via its REST API (HTTP agent). Zabbix 7.4+ (nested LLD).
+      Lightweight: only what is needed to know that backups are fine.
 
       Monitors:
-      - API availability, version, subscription, package updates, API certificate expiry;
-      - CPU utilization / iowait / load, memory, swap, root filesystem, uptime;
-      - datastores: size, usage, forecast of full date, errors;
-      - freshness of every backup group (vm/ct/host) in every datastore and namespace;
-      - tasks for the last {$PBS.TASKS.PERIOD}h: OK / warning / failed per category (backup, restore, sync, verify, prune, gc, tape) + list of failed tasks;
-      - scheduled sync, verify, prune, garbage collection and tape backup jobs: last result, last/next run;
-      - disks: SMART status, SSD wearout; ZFS pools: health, usage, fragmentation.
+      - API availability;
+      - CPU utilization, root filesystem usage;
+      - datastores: space utilization and available space;
+      - freshness of every backup group (vm/ct/host) in every datastore and namespace:
+        AVERAGE after {$PBS.GROUP.AGE.WARN}h, HIGH after {$PBS.GROUP.AGE.CRIT}h without a new snapshot;
+      - sync, verify, prune and garbage collection jobs: result of the last run (error text in the problem name).
 
       Setup (PBS side):
         proxmox-backup-manager user create zabbix@pbs
@@ -49,7 +49,7 @@ zabbix_export:
           return JSON.parse(value).data.version ? 1 : 0;
       timeout: '{$PBS.TIMEOUT}'
       url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/version'
-      headers: &id001
+      headers:
       - name: Authorization
         value: PBSAPIToken={$PBS.TOKEN.ID}:{$PBS.TOKEN.SECRET}
       tags:
@@ -63,39 +63,6 @@ zabbix_export:
         name: 'PBS: API is unavailable'
         priority: HIGH
         description: PBS API does not answer or rejects the token. Check network, the proxmox-backup-proxy service, {$PBS.TOKEN.ID} / {$PBS.TOKEN.SECRET} macros and the token permissions.
-    - uuid: 59066fdbbeed438b81dd3c88c015fdef
-      name: 'PBS: Version'
-      type: HTTP_AGENT
-      key: pbs.version
-      delay: 1h
-      history: 30d
-      value_type: CHAR
-      description: Proxmox Backup Server version.
-      preprocessing:
-      - type: JAVASCRIPT
-        parameters:
-        - |
-          var d = JSON.parse(value).data;
-          return d.version + (d.release !== undefined ? "." + d.release : "");
-      - type: DISCARD_UNCHANGED_HEARTBEAT
-        parameters:
-        - 1d
-      timeout: '{$PBS.TIMEOUT}'
-      url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/version'
-      headers: *id001
-      tags:
-      - tag: component
-        value: system
-      triggers:
-      - uuid: 22f470563ce54c30b129378e33e4cf24
-        expression: last(/Proxmox Backup Server by HTTP/pbs.version,#1)<>last(/Proxmox Backup Server by HTTP/pbs.version,#2) and length(last(/Proxmox Backup Server by HTTP/pbs.version))>0
-        name: 'PBS: Version has changed'
-        priority: INFO
-        manual_close: 'YES'
-        description: PBS version has changed. Acknowledge to close.
-        dependencies:
-        - name: 'PBS: API is unavailable'
-          expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
     - uuid: c22bf24b092f42019c3c957dc95b4e8b
       name: 'PBS: Get node status'
       type: HTTP_AGENT
@@ -110,7 +77,9 @@ zabbix_export:
         - $.data
       timeout: '{$PBS.TIMEOUT}'
       url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/nodes/{$PBS.NODE}/status'
-      headers: *id001
+      headers:
+      - name: Authorization
+        value: PBSAPIToken={$PBS.TOKEN.ID}:{$PBS.TOKEN.SECRET}
       tags:
       - tag: component
         value: raw
@@ -144,268 +113,6 @@ zabbix_export:
         dependencies:
         - name: 'PBS: API is unavailable'
           expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-    - uuid: 29aa1535db6544689aa0dddfb0af7703
-      name: 'PBS: CPU iowait'
-      type: DEPENDENT
-      key: pbs.cpu.iowait
-      delay: '0'
-      value_type: FLOAT
-      units: '%'
-      description: Share of CPU time spent waiting for I/O, in %. High values usually mean slow datastore disks.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.wait
-        error_handler: DISCARD_VALUE
-        error_handler_params: ''
-      - type: MULTIPLIER
-        parameters:
-        - '100'
-      master_item:
-        key: pbs.node.status
-      tags:
-      - tag: component
-        value: cpu
-      triggers:
-      - uuid: de4171e9250d450dacd756927d1433c8
-        expression: min(/Proxmox Backup Server by HTTP/pbs.cpu.iowait,10m)>{$PBS.CPU.IOWAIT.MAX}
-        name: 'PBS: High CPU iowait (over {$PBS.CPU.IOWAIT.MAX}% for 10m)'
-        priority: WARNING
-        opdata: 'Current iowait: {ITEM.LASTVALUE1}'
-        description: Disks cannot keep up with the I/O load.
-        dependencies:
-        - name: 'PBS: API is unavailable'
-          expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-    - uuid: 6bbf5d06c1e944e6899fbc8653addae9
-      name: 'PBS: Number of CPUs'
-      type: DEPENDENT
-      key: pbs.cpu.num
-      delay: '0'
-      description: Number of logical CPUs.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.cpuinfo.cpus
-      - type: DISCARD_UNCHANGED_HEARTBEAT
-        parameters:
-        - 1d
-      master_item:
-        key: pbs.node.status
-      tags:
-      - tag: component
-        value: cpu
-    - uuid: 128c72b4828f42bfbf56244205cbd6b5
-      name: 'PBS: CPU model'
-      type: DEPENDENT
-      key: pbs.cpu.model
-      delay: '0'
-      value_type: CHAR
-      description: CPU model.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.cpuinfo.model
-      - type: DISCARD_UNCHANGED_HEARTBEAT
-        parameters:
-        - 1d
-      master_item:
-        key: pbs.node.status
-      tags:
-      - tag: component
-        value: cpu
-    - uuid: 029f6fe38110481691684d00a7f4f1f3
-      name: 'PBS: Load average (1m avg)'
-      type: DEPENDENT
-      key: pbs.load[avg1]
-      delay: '0'
-      value_type: FLOAT
-      description: System load average over 1 minute(s).
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.loadavg[0]
-      master_item:
-        key: pbs.node.status
-      tags:
-      - tag: component
-        value: cpu
-    - uuid: b75b2c66d56440d192403330810da7ac
-      name: 'PBS: Load average (5m avg)'
-      type: DEPENDENT
-      key: pbs.load[avg5]
-      delay: '0'
-      value_type: FLOAT
-      description: System load average over 5 minute(s).
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.loadavg[1]
-      master_item:
-        key: pbs.node.status
-      tags:
-      - tag: component
-        value: cpu
-    - uuid: 504854debfd5487986c45e555a94e551
-      name: 'PBS: Load average (15m avg)'
-      type: DEPENDENT
-      key: pbs.load[avg15]
-      delay: '0'
-      value_type: FLOAT
-      description: System load average over 15 minute(s).
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.loadavg[2]
-      master_item:
-        key: pbs.node.status
-      tags:
-      - tag: component
-        value: cpu
-    - uuid: b70a1f5f19624c5a9ee59d59c01502d5
-      name: 'PBS: Memory total'
-      type: DEPENDENT
-      key: pbs.memory.total
-      delay: '0'
-      units: B
-      description: Total memory.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.memory.total
-      master_item:
-        key: pbs.node.status
-      tags:
-      - tag: component
-        value: memory
-    - uuid: f7332c70a8484d3bbea182538dde5c7a
-      name: 'PBS: Memory used'
-      type: DEPENDENT
-      key: pbs.memory.used
-      delay: '0'
-      units: B
-      description: Used memory.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.memory.used
-      master_item:
-        key: pbs.node.status
-      tags:
-      - tag: component
-        value: memory
-    - uuid: 1bd36687f72744a0aad235fdf3998ee9
-      name: 'PBS: Memory utilization'
-      type: DEPENDENT
-      key: pbs.memory.pused
-      delay: '0'
-      value_type: FLOAT
-      units: '%'
-      description: Memory utilization in %.
-      preprocessing:
-      - type: JAVASCRIPT
-        parameters:
-        - |
-          var m = JSON.parse(value).memory;
-          return m.total > 0 ? m.used / m.total * 100 : 0;
-      master_item:
-        key: pbs.node.status
-      tags:
-      - tag: component
-        value: memory
-      triggers:
-      - uuid: 7cda6e75e2e1448f8f05de7e3ffd046a
-        expression: min(/Proxmox Backup Server by HTTP/pbs.memory.pused,5m)>{$PBS.MEMORY.PUSED.MAX}
-        name: 'PBS: High memory utilization (over {$PBS.MEMORY.PUSED.MAX}% for 5m)'
-        priority: AVERAGE
-        opdata: 'Used: {ITEM.LASTVALUE1}'
-        description: The system is running out of free memory.
-        dependencies:
-        - name: 'PBS: API is unavailable'
-          expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-    - uuid: 37089ae6323c4975bed5f49455fdaef7
-      name: 'PBS: Swap total'
-      type: DEPENDENT
-      key: pbs.swap.total
-      delay: '0'
-      units: B
-      description: Total swap.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.swap.total
-        error_handler: DISCARD_VALUE
-        error_handler_params: ''
-      master_item:
-        key: pbs.node.status
-      tags:
-      - tag: component
-        value: memory
-    - uuid: b234beff4b934e4f893d53200d0f1a3e
-      name: 'PBS: Swap used'
-      type: DEPENDENT
-      key: pbs.swap.used
-      delay: '0'
-      units: B
-      description: Used swap.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.swap.used
-        error_handler: DISCARD_VALUE
-        error_handler_params: ''
-      master_item:
-        key: pbs.node.status
-      tags:
-      - tag: component
-        value: memory
-    - uuid: 04b6f092c3c24143a28651a5bc32b53a
-      name: 'PBS: Root filesystem total'
-      type: DEPENDENT
-      key: pbs.rootfs.total
-      delay: '0'
-      units: B
-      description: Root filesystem size.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.root.total
-      master_item:
-        key: pbs.node.status
-      tags:
-      - tag: component
-        value: storage
-    - uuid: 2717b4a820e4416a9fe052e27e255433
-      name: 'PBS: Root filesystem used'
-      type: DEPENDENT
-      key: pbs.rootfs.used
-      delay: '0'
-      units: B
-      description: Root filesystem used space.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.root.used
-      master_item:
-        key: pbs.node.status
-      tags:
-      - tag: component
-        value: storage
-    - uuid: 2db3a9a85d5444eda6058d32fc4fdaa7
-      name: 'PBS: Root filesystem available'
-      type: DEPENDENT
-      key: pbs.rootfs.avail
-      delay: '0'
-      units: B
-      description: Root filesystem available space.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.root.avail
-      master_item:
-        key: pbs.node.status
-      tags:
-      - tag: component
-        value: storage
     - uuid: e1adac3d9c3f4747ba4247464ab97b90
       name: 'PBS: Root filesystem utilization'
       type: DEPENDENT
@@ -435,791 +142,6 @@ zabbix_export:
         dependencies:
         - name: 'PBS: API is unavailable'
           expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-    - uuid: ddc934671123493782d0a18fa59a1d20
-      name: 'PBS: Uptime'
-      type: DEPENDENT
-      key: pbs.uptime
-      delay: '0'
-      units: uptime
-      description: System uptime.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.uptime
-      master_item:
-        key: pbs.node.status
-      tags:
-      - tag: component
-        value: system
-      triggers:
-      - uuid: e11f512723aa48c5bee64069a88f2399
-        expression: last(/Proxmox Backup Server by HTTP/pbs.uptime)<10m
-        name: 'PBS: Host has been restarted'
-        priority: INFO
-        opdata: 'Uptime: {ITEM.LASTVALUE1}'
-        manual_close: 'YES'
-        description: Uptime is less than 10 minutes.
-        dependencies:
-        - name: 'PBS: API is unavailable'
-          expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-    - uuid: ee0aba9b20dc486486d09f1533e98b01
-      name: 'PBS: Kernel version'
-      type: DEPENDENT
-      key: pbs.kernel
-      delay: '0'
-      value_type: CHAR
-      description: Running kernel version.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.kversion
-      - type: DISCARD_UNCHANGED_HEARTBEAT
-        parameters:
-        - 1d
-      master_item:
-        key: pbs.node.status
-      tags:
-      - tag: component
-        value: system
-    - uuid: c33f00fa770c4881b2d31064667bc706
-      name: 'PBS: Get tasks'
-      type: HTTP_AGENT
-      key: pbs.tasks
-      delay: '{$PBS.TASKS.INTERVAL}'
-      history: '0'
-      value_type: TEXT
-      description: |-
-        Task list of the node, aggregated over the last {$PBS.TASKS.PERIOD} hours: number of OK / warning / error / running tasks per category and the list of failed tasks.
-        Categories: backup (client backups pushed from PVE / proxmox-backup-client), restore, sync, verify, prune, gc, tape, other.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.data
-      - type: JAVASCRIPT
-        parameters:
-        - |
-          var period = parseFloat('{$PBS.TASKS.PERIOD}') * 3600;
-          var since = Math.floor(Date.now() / 1000) - period;
-          var tasks = JSON.parse(value);
-          var cats = ['all', 'backup', 'restore', 'sync', 'verify', 'prune', 'gc', 'tape', 'other'];
-          var out = {}, failed = [];
-          cats.forEach(function (c) { out[c] = {ok: 0, warning: 0, error: 0, running: 0}; });
-
-          function category(type) {
-              if (/tape/.test(type)) return 'tape';
-              if (type === 'backup') return 'backup';
-              if (type === 'reader') return 'restore';
-              if (/sync/.test(type)) return 'sync';
-              if (/^verif/.test(type)) return 'verify';
-              if (/prune/.test(type)) return 'prune';
-              if (type === 'garbage_collection') return 'gc';
-              return 'other';
-          }
-
-          function pad(n) { return n < 10 ? '0' + n : '' + n; }
-          function fmt(ts) {
-              var d = new Date(ts * 1000);
-              return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' '
-                  + pad(d.getHours()) + ':' + pad(d.getMinutes());
-          }
-
-          tasks.forEach(function (t) {
-              var running = (t.endtime === undefined || t.endtime === null);
-              if (!running && t.starttime < since) return;
-              var st, s = String(t.status || '');
-              if (running) st = 'running';
-              else if (s === 'OK') st = 'ok';
-              else if (/^WARNINGS/.test(s)) st = 'warning';
-              else st = 'error';
-              var c = category(String(t.worker_type || ''));
-              out[c][st]++;
-              out.all[st]++;
-              if (st === 'error') failed.push(t);
-          });
-
-          failed.sort(function (a, b) { return b.starttime - a.starttime; });
-          cats.forEach(function (c) {
-              var list = failed.filter(function (t) { return c === 'all' || category(String(t.worker_type || '')) === c; });
-              out[c].failed = list.slice(0, 5).map(function (t) {
-                  var line = t.worker_type + ' ' + (t.worker_id || '-') + ': ' + t.status;
-                  return line.length > 200 ? line.substring(0, 197) + '...' : line;
-              }).join('; ') + (list.length > 5 ? '; +' + (list.length - 5) + ' more' : '');
-          });
-          out.failed = failed.length ? failed.slice(0, 30).map(function (t) {
-              return fmt(t.starttime) + ' ' + t.worker_type + ' ' + (t.worker_id || '-') + ': ' + t.status;
-          }).join('\n') : 'none';
-          return JSON.stringify(out);
-      timeout: '{$PBS.TIMEOUT}'
-      url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/nodes/{$PBS.NODE}/tasks'
-      headers: *id001
-      tags:
-      - tag: component
-        value: raw
-      query_fields:
-      - name: limit
-        value: '{$PBS.TASKS.LIMIT}'
-    - uuid: 35fef5e96120474095f0ff562255dbf8
-      name: 'PBS: All tasks OK (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[all,ok]
-      delay: '0'
-      description: Number of all tasks OK during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.all.ok
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: all
-    - uuid: 26bf1af485834fe7a172946f679afe23
-      name: 'PBS: All tasks with warnings (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[all,warning]
-      delay: '0'
-      description: Number of all tasks with warnings during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.all.warning
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: all
-    - uuid: 4aad2d0ebf424cde8ba23e2bf6d12d63
-      name: 'PBS: All tasks failed (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[all,error]
-      delay: '0'
-      description: Number of all tasks failed during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.all.error
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: all
-    - uuid: 362448fddcd04ed9bcf359606cb2f5f3
-      name: 'PBS: Running tasks'
-      type: DEPENDENT
-      key: pbs.tasks.count[all,running]
-      delay: '0'
-      description: Number of currently running tasks.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.all.running
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: all
-    - uuid: 373fca70ae08497c9f53dffcaec988b1
-      name: 'PBS: Backup tasks OK (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[backup,ok]
-      delay: '0'
-      description: Number of backup tasks OK during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.backup.ok
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: backup
-    - uuid: a55643755fda44fe827f1a90fccc2e57
-      name: 'PBS: Backup tasks with warnings (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[backup,warning]
-      delay: '0'
-      description: Number of backup tasks with warnings during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.backup.warning
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: backup
-    - uuid: 8086faa85107448a9dd958e6a0eb7596
-      name: 'PBS: Backup tasks failed (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[backup,error]
-      delay: '0'
-      description: Number of backup tasks failed during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.backup.error
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: backup
-    - uuid: bc0b5797a7284f049ef9fe7440149c0c
-      name: 'PBS: Restore tasks OK (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[restore,ok]
-      delay: '0'
-      description: Number of restore tasks OK during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.restore.ok
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: restore
-    - uuid: d33257e7c0474cd28cb6172ee1f01b6c
-      name: 'PBS: Restore tasks with warnings (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[restore,warning]
-      delay: '0'
-      description: Number of restore tasks with warnings during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.restore.warning
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: restore
-    - uuid: ca39edc1334c46529d93c89d308bd7e3
-      name: 'PBS: Restore tasks failed (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[restore,error]
-      delay: '0'
-      description: Number of restore tasks failed during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.restore.error
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: restore
-    - uuid: 5b58cbe9dfb74a78b6234c2f7c5f6231
-      name: 'PBS: Sync tasks OK (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[sync,ok]
-      delay: '0'
-      description: Number of sync tasks OK during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.sync.ok
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: sync
-    - uuid: bc5515e3b7cd444d8d1636174e8bc96b
-      name: 'PBS: Sync tasks with warnings (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[sync,warning]
-      delay: '0'
-      description: Number of sync tasks with warnings during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.sync.warning
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: sync
-    - uuid: 0921836710be4b29bb4d4ecdb583102c
-      name: 'PBS: Sync tasks failed (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[sync,error]
-      delay: '0'
-      description: Number of sync tasks failed during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.sync.error
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: sync
-    - uuid: 89cd5d9894bd4ae7b174e91e0775e325
-      name: 'PBS: Verify tasks OK (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[verify,ok]
-      delay: '0'
-      description: Number of verify tasks OK during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.verify.ok
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: verify
-    - uuid: 6f7ff33f71bc418da44a58fdd43a25c3
-      name: 'PBS: Verify tasks with warnings (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[verify,warning]
-      delay: '0'
-      description: Number of verify tasks with warnings during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.verify.warning
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: verify
-    - uuid: c4651291f7b9476dbcc3b4971ce26703
-      name: 'PBS: Verify tasks failed (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[verify,error]
-      delay: '0'
-      description: Number of verify tasks failed during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.verify.error
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: verify
-    - uuid: 3bbd3ca4cf344ae69319b20ff7902858
-      name: 'PBS: Prune tasks OK (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[prune,ok]
-      delay: '0'
-      description: Number of prune tasks OK during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.prune.ok
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: prune
-    - uuid: a33ba2bcfaf347f58bc9ad309f13c980
-      name: 'PBS: Prune tasks with warnings (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[prune,warning]
-      delay: '0'
-      description: Number of prune tasks with warnings during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.prune.warning
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: prune
-    - uuid: a7661b23f6de45bf951aeaeb1101e324
-      name: 'PBS: Prune tasks failed (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[prune,error]
-      delay: '0'
-      description: Number of prune tasks failed during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.prune.error
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: prune
-    - uuid: 92d2381905f2482fa02c1f21504fcc0b
-      name: 'PBS: GC tasks OK (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[gc,ok]
-      delay: '0'
-      description: Number of gc tasks OK during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.gc.ok
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: gc
-    - uuid: bb1601bf462145e58773fc0538457934
-      name: 'PBS: GC tasks with warnings (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[gc,warning]
-      delay: '0'
-      description: Number of gc tasks with warnings during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.gc.warning
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: gc
-    - uuid: 9a92b236d3194499a4b8684ae35dfa06
-      name: 'PBS: GC tasks failed (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[gc,error]
-      delay: '0'
-      description: Number of gc tasks failed during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.gc.error
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: gc
-    - uuid: 527920f222ef46a695abaafbe2e8bbf8
-      name: 'PBS: Tape tasks OK (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[tape,ok]
-      delay: '0'
-      description: Number of tape tasks OK during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.tape.ok
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: tape
-    - uuid: 1b5bcba6d7cf45aa8aceeefeb7c902c7
-      name: 'PBS: Tape tasks with warnings (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[tape,warning]
-      delay: '0'
-      description: Number of tape tasks with warnings during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.tape.warning
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: tape
-    - uuid: b50ad799b0d04a38bece2d318c3b7073
-      name: 'PBS: Tape tasks failed (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[tape,error]
-      delay: '0'
-      description: Number of tape tasks failed during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.tape.error
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: tape
-    - uuid: 140527f52f60459fb70d3936fd638433
-      name: 'PBS: Other tasks OK (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[other,ok]
-      delay: '0'
-      description: Number of other tasks OK during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.other.ok
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: other
-    - uuid: 9d097db7a0bb47eca4011ad1a7daecdb
-      name: 'PBS: Other tasks with warnings (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[other,warning]
-      delay: '0'
-      description: Number of other tasks with warnings during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.other.warning
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: other
-    - uuid: 3b38d807af754fe8886e687969774255
-      name: 'PBS: Other tasks failed (period)'
-      type: DEPENDENT
-      key: pbs.tasks.count[other,error]
-      delay: '0'
-      description: Number of other tasks failed during the last {$PBS.TASKS.PERIOD} hours.
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.other.error
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: other
-    - uuid: d3ac027c57c14baa8199e9282757aae8
-      name: 'PBS: Backup tasks failed: list (period)'
-      type: DEPENDENT
-      key: pbs.tasks.failed[backup]
-      delay: '0'
-      history: 7d
-      value_type: TEXT
-      description: Up to 5 most recent failed backup tasks during the last {$PBS.TASKS.PERIOD} hours (type, id, error).
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.backup.failed
-      - type: DISCARD_UNCHANGED_HEARTBEAT
-        parameters:
-        - 1h
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: backup
-    - uuid: 1eda827559fd4fb2ae9054af07966fda
-      name: 'PBS: Restore tasks failed: list (period)'
-      type: DEPENDENT
-      key: pbs.tasks.failed[restore]
-      delay: '0'
-      history: 7d
-      value_type: TEXT
-      description: Up to 5 most recent failed restore tasks during the last {$PBS.TASKS.PERIOD} hours (type, id, error).
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.restore.failed
-      - type: DISCARD_UNCHANGED_HEARTBEAT
-        parameters:
-        - 1h
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: restore
-    - uuid: 0c0e97172af743ef9f3cd16247860545
-      name: 'PBS: Other tasks failed: list (period)'
-      type: DEPENDENT
-      key: pbs.tasks.failed[other]
-      delay: '0'
-      history: 7d
-      value_type: TEXT
-      description: Up to 5 most recent failed other tasks during the last {$PBS.TASKS.PERIOD} hours (type, id, error).
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.other.failed
-      - type: DISCARD_UNCHANGED_HEARTBEAT
-        parameters:
-        - 1h
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-      - tag: task
-        value: other
-    - uuid: 4d2128d6623a472c873b3f3fb137fffd
-      name: 'PBS: Failed tasks list'
-      type: DEPENDENT
-      key: pbs.tasks.failed
-      delay: '0'
-      history: 7d
-      value_type: TEXT
-      description: Up to 30 most recent failed tasks during the last {$PBS.TASKS.PERIOD} hours (time, type, id, error).
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.failed
-      - type: DISCARD_UNCHANGED_HEARTBEAT
-        parameters:
-        - 1h
-      master_item:
-        key: pbs.tasks
-      tags:
-      - tag: component
-        value: tasks
-    - uuid: 3dc09c294b2d4a0998febb275a44134c
-      name: 'PBS: Subscription status'
-      type: HTTP_AGENT
-      key: pbs.subscription.status
-      delay: 6h
-      history: 30d
-      value_type: CHAR
-      description: 'Subscription status: new, notfound, active, invalid, expired, suspended.'
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.data.status
-      - type: DISCARD_UNCHANGED_HEARTBEAT
-        parameters:
-        - 1d
-      timeout: '{$PBS.TIMEOUT}'
-      url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/nodes/{$PBS.NODE}/subscription'
-      headers: *id001
-      tags:
-      - tag: component
-        value: system
-      triggers:
-      - uuid: c700fb05d72449fb9d13531fd1d366e7
-        expression: find(/Proxmox Backup Server by HTTP/pbs.subscription.status,,"regexp","^(invalid|expired|suspended)$")=1
-        name: 'PBS: Subscription is not valid'
-        priority: INFO
-        opdata: 'Status: {ITEM.LASTVALUE1}'
-        description: Subscription is invalid, expired or suspended. Not a problem for no-subscription setups (status "notfound").
-        dependencies:
-        - name: 'PBS: API is unavailable'
-          expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-    - uuid: 6f12b67bd58b45c3bc0d20ec1f028d64
-      name: 'PBS: Available package updates'
-      type: HTTP_AGENT
-      key: pbs.apt.updates
-      delay: 6h
-      history: 30d
-      value_type: UNSIGNED
-      description: Number of packages with available updates (from the last apt update run by PBS).
-      preprocessing:
-      - type: JAVASCRIPT
-        parameters:
-        - |
-          return JSON.parse(value).data.length;
-      timeout: '{$PBS.TIMEOUT}'
-      url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/nodes/{$PBS.NODE}/apt/update'
-      headers: *id001
-      tags:
-      - tag: component
-        value: system
-      triggers:
-      - uuid: 6a56e9d5bce84c94ab1f3f283c66d326
-        expression: last(/Proxmox Backup Server by HTTP/pbs.apt.updates)>0
-        name: 'PBS: Package updates are available'
-        priority: INFO
-        opdata: 'Updates: {ITEM.LASTVALUE1}'
-        manual_close: 'YES'
-        status: DISABLED
-        description: There are package updates available on PBS.
-        dependencies:
-        - name: 'PBS: API is unavailable'
-          expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-    - uuid: 9809e17203e5412e868af99864b30603
-      name: 'PBS: API certificate expires'
-      type: HTTP_AGENT
-      key: pbs.cert.expiry
-      delay: 6h
-      history: 30d
-      value_type: UNSIGNED
-      description: Expiry date of the certificate used by the PBS API/web UI (proxy.pem).
-      preprocessing:
-      - type: JAVASCRIPT
-        parameters:
-        - |
-          var certs = JSON.parse(value).data, min = 0;
-          certs.forEach(function (c) {
-              if (c.filename === 'proxy.pem' && c.notafter) min = c.notafter;
-          });
-          if (!min) {
-              certs.forEach(function (c) { if (c.notafter && (!min || c.notafter < min)) min = c.notafter; });
-          }
-          if (!min) throw 'No certificates found';
-          return min;
-      timeout: '{$PBS.TIMEOUT}'
-      url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/nodes/{$PBS.NODE}/certificates/info'
-      headers: *id001
-      tags:
-      - tag: component
-        value: system
-      units: unixtime
-      triggers:
-      - uuid: 2fad2305ec6a476c8cabbd97a99a9054
-        expression: (last(/Proxmox Backup Server by HTTP/pbs.cert.expiry)-now())/86400<{$PBS.CERT.EXPIRY.WARN}
-        name: 'PBS: API certificate expires in less than {$PBS.CERT.EXPIRY.WARN} days'
-        priority: WARNING
-        opdata: 'Expires: {ITEM.LASTVALUE1}'
-        description: Renew the PBS certificate (ACME or manual).
-        dependencies:
-        - name: 'PBS: API is unavailable'
-          expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
     - uuid: 6f13cbcf2cd741bbafcfc9a2de4ac3e8
       name: 'PBS: Get datastore usage'
       type: HTTP_AGENT
@@ -1234,7 +156,9 @@ zabbix_export:
         - $.data
       timeout: '{$PBS.TIMEOUT}'
       url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/status/datastore-usage'
-      headers: *id001
+      headers:
+      - name: Authorization
+        value: PBSAPIToken={$PBS.TOKEN.ID}:{$PBS.TOKEN.SECRET}
       tags:
       - tag: component
         value: raw
@@ -1305,7 +229,9 @@ zabbix_export:
           return JSON.stringify(jobs);
       timeout: '{$PBS.TIMEOUT}'
       url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/admin/sync'
-      headers: *id001
+      headers:
+      - name: Authorization
+        value: PBSAPIToken={$PBS.TOKEN.ID}:{$PBS.TOKEN.SECRET}
       tags:
       - tag: component
         value: raw
@@ -1376,7 +302,9 @@ zabbix_export:
           return JSON.stringify(jobs);
       timeout: '{$PBS.TIMEOUT}'
       url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/admin/verify'
-      headers: *id001
+      headers:
+      - name: Authorization
+        value: PBSAPIToken={$PBS.TOKEN.ID}:{$PBS.TOKEN.SECRET}
       tags:
       - tag: component
         value: raw
@@ -1447,7 +375,9 @@ zabbix_export:
           return JSON.stringify(jobs);
       timeout: '{$PBS.TIMEOUT}'
       url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/admin/prune'
-      headers: *id001
+      headers:
+      - name: Authorization
+        value: PBSAPIToken={$PBS.TOKEN.ID}:{$PBS.TOKEN.SECRET}
       tags:
       - tag: component
         value: raw
@@ -1518,114 +448,9 @@ zabbix_export:
           return JSON.stringify(jobs);
       timeout: '{$PBS.TIMEOUT}'
       url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/admin/gc'
-      headers: *id001
-      tags:
-      - tag: component
-        value: raw
-    - uuid: 9bb401ac65f84bdb86dc2946e3c504c8
-      name: 'PBS: Get tape backup job status'
-      type: HTTP_AGENT
-      key: pbs.jobs[tape]
-      delay: '{$PBS.JOBS.INTERVAL}'
-      history: '0'
-      value_type: TEXT
-      description: Raw status of all tape backup jobs (/tape/backup).
-      preprocessing:
-      - type: JAVASCRIPT
-        parameters:
-        - |
-          // 0 OK, 1 warnings, 2 error, 3 running, 4 never run
-          function stateCode(state, endtime, upid) {
-              if (state === undefined || state === null || state === '') {
-                  return upid ? 3 : 4;
-              }
-              var s = String(state);
-              if (s === 'OK' || s === 'ok') return 0;
-              if (/^WARNINGS/i.test(s)) return 1;
-              return 2;
-          }
-
-          var kind = 'tape';
-          // Human-readable job name: datastore[/namespace], plus comment if set.
-          // Job IDs of prune / verify / sync jobs are auto-generated (default-<store>-<uuid>).
-          function path(store, ns) { return (store || '') + (ns ? '/' + ns : ''); }
-          function label(j) {
-              var n;
-              if (kind === 'sync') {
-                  var local = path(j.store, j.ns);
-                  var remote = (j.remote ? j.remote + ':' : '') + path(j['remote-store'], j['remote-ns']);
-                  n = j['sync-direction'] === 'push' ? local + ' -> ' + remote : remote + ' -> ' + local;
-              } else if (kind === 'tape') {
-                  n = String(j.id) + ' (' + (j.store || '') + ' -> ' + (j.pool || '') + ')';
-              } else {
-                  n = path(j.store || j.id, j.ns);
-              }
-              if (j.comment) n += ' - ' + j.comment;
-              return n;
-          }
-
-          var now = Math.floor(Date.now() / 1000);
-          var jobs = (JSON.parse(value).data || []).map(function (j) {
-              var state = j['last-run-state'], upid = j['last-run-upid'] || j.upid;
-              return {
-                  id: String(j.id || j.store),
-                  name: label(j),
-                  store: j.store || '',
-                  remote: j.remote ? j.remote + ':' + (j['remote-store'] || '') : '',
-                  schedule: j.schedule || '',
-                  comment: j.comment || '',
-                  state: state ? String(state) : (upid ? 'running' : 'never run'),
-                  code: stateCode(state, j['last-run-endtime'], upid),
-                  last: j['last-run-endtime'] || 0,
-                  next: j['next-run'] || 0,
-                  duration: j.duration || 0,
-                  pending: j['pending-bytes'],
-                  removed: j['removed-bytes']
-              };
-          });
-          var seen = {};
-          jobs.forEach(function (j) { seen[j.name] = (seen[j.name] || 0) + 1; });
-          jobs.forEach(function (j) { if (seen[j.name] > 1) j.name += ' [' + j.id + ']'; });
-          return JSON.stringify(jobs);
-      timeout: '{$PBS.TIMEOUT}'
-      url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/tape/backup'
-      headers: *id001
-      tags:
-      - tag: component
-        value: raw
-    - uuid: 649c34f12e704ed6af8d53620d399e35
-      name: 'PBS: Get disks'
-      type: HTTP_AGENT
-      key: pbs.disks
-      delay: 1h
-      history: '0'
-      value_type: TEXT
-      description: Raw list of physical disks with SMART status (PBS runs smartctl for this request).
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.data
-      timeout: '{$PBS.TIMEOUT}'
-      url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/nodes/{$PBS.NODE}/disks/list'
-      headers: *id001
-      tags:
-      - tag: component
-        value: raw
-    - uuid: 90910340d410419dacfc193a20336c5a
-      name: 'PBS: Get ZFS pools'
-      type: HTTP_AGENT
-      key: pbs.zfs
-      delay: 5m
-      history: '0'
-      value_type: TEXT
-      description: Raw list of ZFS pools (empty if ZFS is not used).
-      preprocessing:
-      - type: JSONPATH
-        parameters:
-        - $.data
-      timeout: '{$PBS.TIMEOUT}'
-      url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/nodes/{$PBS.NODE}/disks/zfs'
-      headers: *id001
+      headers:
+      - name: Authorization
+        value: PBSAPIToken={$PBS.TOKEN.ID}:{$PBS.TOKEN.SECRET}
       tags:
       - tag: component
         value: raw
@@ -1650,46 +475,6 @@ zabbix_export:
       enabled_lifetime_type: DISABLE_NEVER
       description: Discovers datastores.
       item_prototypes:
-      - uuid: 7a9646cf1b95448fb3ada7b6a435aad9
-        name: 'PBS: Datastore [{#STORE}]: Total space'
-        type: DEPENDENT
-        key: pbs.datastore.total[{#STORE}]
-        delay: '0'
-        units: B
-        description: Total space of the datastore.
-        preprocessing:
-        - type: JSONPATH
-          parameters:
-          - $[?(@.store == '{#STORE}')].total.first()
-          error_handler: DISCARD_VALUE
-          error_handler_params: ''
-        master_item:
-          key: pbs.datastore.usage
-        tags:
-        - tag: component
-          value: datastore
-        - &id002
-          tag: datastore
-          value: '{#STORE}'
-      - uuid: ea122046269c4ed9a15ea5b0f7442e14
-        name: 'PBS: Datastore [{#STORE}]: Used space'
-        type: DEPENDENT
-        key: pbs.datastore.used[{#STORE}]
-        delay: '0'
-        units: B
-        description: Used space of the datastore.
-        preprocessing:
-        - type: JSONPATH
-          parameters:
-          - $[?(@.store == '{#STORE}')].used.first()
-          error_handler: DISCARD_VALUE
-          error_handler_params: ''
-        master_item:
-          key: pbs.datastore.usage
-        tags:
-        - tag: component
-          value: datastore
-        - *id002
       - uuid: 36b630ea272349789301b6a5500f3b1f
         name: 'PBS: Datastore [{#STORE}]: Available space'
         type: DEPENDENT
@@ -1708,7 +493,8 @@ zabbix_export:
         tags:
         - tag: component
           value: datastore
-        - *id002
+        - tag: datastore
+          value: '{#STORE}'
       - uuid: 8e69fda5502e4d3198efe182b80bcfed
         name: 'PBS: Datastore [{#STORE}]: Space utilization'
         type: DEPENDENT
@@ -1733,7 +519,8 @@ zabbix_export:
         tags:
         - tag: component
           value: datastore
-        - *id002
+        - tag: datastore
+          value: '{#STORE}'
         trigger_prototypes:
         - uuid: a7fe3f26667b42559316d9e4e57406d2
           expression: last(/Proxmox Backup Server by HTTP/pbs.datastore.pused[{#STORE}])>{$PBS.DATASTORE.PUSED.CRIT:"{#STORE}"}
@@ -1755,71 +542,6 @@ zabbix_export:
             expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
           - name: 'PBS: Datastore [{#STORE}]: Space is critically low (used > {$PBS.DATASTORE.PUSED.CRIT:"{#STORE}"}%)'
             expression: last(/Proxmox Backup Server by HTTP/pbs.datastore.pused[{#STORE}])>{$PBS.DATASTORE.PUSED.CRIT:"{#STORE}"}
-      - uuid: 07ed890cd45b40aea41dc76701cb8f73
-        name: 'PBS: Datastore [{#STORE}]: Estimated full date'
-        type: DEPENDENT
-        key: pbs.datastore.full_date[{#STORE}]
-        delay: '0'
-        units: unixtime
-        description: Date when the datastore is estimated to be full (PBS linear forecast). 0 = not filling up / not enough history.
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var s = JSON.parse(value).filter(function (d) { return d.store === '{#STORE}'; })[0];
-            if (!s) throw 'Datastore {#STORE} not found';
-            var e = s['estimated-full-date'];
-            return (e && e > 0) ? e : 0;
-        master_item:
-          key: pbs.datastore.usage
-        tags:
-        - tag: component
-          value: datastore
-        - *id002
-        trigger_prototypes:
-        - uuid: f73b1318b7db4e27b52e44334926d72a
-          expression: last(/Proxmox Backup Server by HTTP/pbs.datastore.full_date[{#STORE}])>0 and (last(/Proxmox Backup Server by HTTP/pbs.datastore.full_date[{#STORE}])-now())/86400<{$PBS.DATASTORE.FULL.DAYS:"{#STORE}"}
-          name: 'PBS: Datastore [{#STORE}]: Estimated to be full in less than {$PBS.DATASTORE.FULL.DAYS:"{#STORE}"} days'
-          priority: WARNING
-          opdata: 'Full at: {ITEM.LASTVALUE1}'
-          description: Based on usage history PBS estimates that the datastore will be full soon.
-          dependencies:
-          - name: 'PBS: API is unavailable'
-            expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-      - uuid: e724790137004ee18af8258e1f8f5457
-        name: 'PBS: Datastore [{#STORE}]: Error'
-        type: DEPENDENT
-        key: pbs.datastore.error[{#STORE}]
-        delay: '0'
-        history: 7d
-        value_type: CHAR
-        description: Error reported by PBS for the datastore (unavailable mount, I/O error, etc). "none" = no error.
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var s = JSON.parse(value).filter(function (d) { return d.store === '{#STORE}'; })[0];
-            if (!s) throw 'Datastore {#STORE} not found';
-            return s.error ? String(s.error) : 'none';
-        - type: DISCARD_UNCHANGED_HEARTBEAT
-          parameters:
-          - 1h
-        master_item:
-          key: pbs.datastore.usage
-        tags:
-        - tag: component
-          value: datastore
-        - *id002
-        trigger_prototypes:
-        - uuid: ec7cd0f1235e4592b3812507fc310771
-          expression: last(/Proxmox Backup Server by HTTP/pbs.datastore.error[{#STORE}])<>"none"
-          name: 'PBS: Datastore [{#STORE}]: Datastore reports an error'
-          priority: HIGH
-          opdata: '{ITEM.LASTVALUE1}'
-          description: PBS reports an error for the datastore (e.g. not mounted, I/O error).
-          dependencies:
-          - name: 'PBS: API is unavailable'
-            expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
       master_item:
         key: pbs.datastore.usage
       lld_macro_paths:
@@ -1837,7 +559,9 @@ zabbix_export:
         key: pbs.datastore.discovery
       timeout: '{$PBS.TIMEOUT}'
       url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/admin/datastore/{#STORE}/namespace'
-      headers: *id001
+      headers:
+      - name: Authorization
+        value: PBSAPIToken={$PBS.TOKEN.ID}:{$PBS.TOKEN.SECRET}
       lld_macro_paths:
       - lld_macro: '{#NS}'
         path: $.ns
@@ -1881,7 +605,9 @@ zabbix_export:
           formulaid: B
       timeout: '{$PBS.TIMEOUT}'
       url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/admin/datastore/{#STORE}/groups{#NS.QUERY}'
-      headers: *id001
+      headers:
+      - name: Authorization
+        value: PBSAPIToken={$PBS.TOKEN.ID}:{$PBS.TOKEN.SECRET}
       lld_macro_paths:
       - lld_macro: '{#BTYPE}'
         path: $['backup-type']
@@ -1905,14 +631,14 @@ zabbix_export:
               };
           }));
       item_prototypes:
-      - uuid: de82305815924d9c88aa884bff8d33bf
-        name: 'PBS: Backup [{#STORE}{#NS.LABEL}{#BTYPE}/{#BID}]: Get group data'
+      - uuid: cc2922f1f2084a7583aed3ac7f0df63f
+        name: 'PBS: Backup [{#STORE}{#NS.LABEL}{#BTYPE}/{#BID}]: Last backup age'
         type: HTTP_AGENT
-        key: pbs.group.raw["{#STORE}","{#NS}","{#BTYPE}","{#BID}"]
+        key: pbs.group.age["{#STORE}","{#NS}","{#BTYPE}","{#BID}"]
         delay: '{$PBS.GROUP.INTERVAL}'
-        history: '0'
-        value_type: TEXT
-        description: Raw data of the backup group (taken from the group list of its namespace).
+        history: 30d
+        units: s
+        description: Time since the newest snapshot of the group (one request to the group list of its namespace). On a sync target the snapshot time is the original backup time, so this shows end-to-end freshness.
         preprocessing:
         - type: JAVASCRIPT
           parameters:
@@ -1921,39 +647,19 @@ zabbix_export:
                 return x['backup-type'] === '{#BTYPE}' && x['backup-id'] === '{#BID}';
             })[0];
             if (!g) throw 'Backup group {#BTYPE}/{#BID} not found';
-            return JSON.stringify(g);
+            return Math.max(0, Math.floor(Date.now() / 1000) - g['last-backup']);
         timeout: '{$PBS.TIMEOUT}'
         url: '{$PBS.SCHEME}://{HOST.CONN}:{$PBS.PORT}/api2/json/admin/datastore/{#STORE}/groups{#NS.QUERY}'
-        headers: *id001
-        tags:
-        - tag: component
-          value: raw
-        - &id003
-          tag: datastore
-          value: '{#STORE}'
-        - &id004
-          tag: backup_group
-          value: '{#BTYPE}/{#BID}'
-      - uuid: cc2922f1f2084a7583aed3ac7f0df63f
-        name: 'PBS: Backup [{#STORE}{#NS.LABEL}{#BTYPE}/{#BID}]: Last backup age'
-        type: DEPENDENT
-        key: pbs.group.age["{#STORE}","{#NS}","{#BTYPE}","{#BID}"]
-        delay: '0'
-        history: 30d
-        units: s
-        description: Time since the newest snapshot of the group. On a sync target the snapshot time is the original backup time, so this shows end-to-end freshness.
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            return Math.max(0, Math.floor(Date.now() / 1000) - JSON.parse(value)['last-backup']);
-        master_item:
-          key: pbs.group.raw["{#STORE}","{#NS}","{#BTYPE}","{#BID}"]
+        headers:
+        - name: Authorization
+          value: PBSAPIToken={$PBS.TOKEN.ID}:{$PBS.TOKEN.SECRET}
         tags:
         - tag: component
           value: backup
-        - *id003
-        - *id004
+        - tag: datastore
+          value: '{#STORE}'
+        - tag: backup_group
+          value: '{#BTYPE}/{#BID}'
         trigger_prototypes:
         - uuid: 08cd54afc2b0404696c9d6077dd79285
           expression: last(/Proxmox Backup Server by HTTP/pbs.group.age["{#STORE}","{#NS}","{#BTYPE}","{#BID}"])>{$PBS.GROUP.AGE.CRIT:"{#BTYPE}/{#BID}"}*3600
@@ -1968,7 +674,7 @@ zabbix_export:
         - uuid: acb81a8db72d495db0ae16262290b3ee
           expression: last(/Proxmox Backup Server by HTTP/pbs.group.age["{#STORE}","{#NS}","{#BTYPE}","{#BID}"])>{$PBS.GROUP.AGE.WARN:"{#BTYPE}/{#BID}"}*3600
           name: 'PBS: Backup [{#STORE}{#NS.LABEL}{#BTYPE}/{#BID}]: No backup for more than {$PBS.GROUP.AGE.WARN:"{#BTYPE}/{#BID}"}h'
-          priority: WARNING
+          priority: AVERAGE
           opdata: 'Last backup: {ITEM.LASTVALUE1} ago'
           manual_close: 'YES'
           description: The last backup run of this group was probably missed or failed.
@@ -1977,46 +683,6 @@ zabbix_export:
             expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
           - name: 'PBS: Backup [{#STORE}{#NS.LABEL}{#BTYPE}/{#BID}]: No backup for more than {$PBS.GROUP.AGE.CRIT:"{#BTYPE}/{#BID}"}h'
             expression: last(/Proxmox Backup Server by HTTP/pbs.group.age["{#STORE}","{#NS}","{#BTYPE}","{#BID}"])>{$PBS.GROUP.AGE.CRIT:"{#BTYPE}/{#BID}"}*3600
-      - uuid: 9a94a786918e4b69bdf18de058acfba9
-        name: 'PBS: Backup [{#STORE}{#NS.LABEL}{#BTYPE}/{#BID}]: Last backup time'
-        type: DEPENDENT
-        key: pbs.group.last["{#STORE}","{#NS}","{#BTYPE}","{#BID}"]
-        delay: '0'
-        history: 30d
-        units: unixtime
-        description: Time of the newest snapshot.
-        preprocessing:
-        - type: JSONPATH
-          parameters:
-          - $['last-backup']
-        - type: DISCARD_UNCHANGED_HEARTBEAT
-          parameters:
-          - 1d
-        master_item:
-          key: pbs.group.raw["{#STORE}","{#NS}","{#BTYPE}","{#BID}"]
-        tags:
-        - tag: component
-          value: backup
-        - *id003
-        - *id004
-      - uuid: acaae3d8b29441d68907c98310a4f1b5
-        name: 'PBS: Backup [{#STORE}{#NS.LABEL}{#BTYPE}/{#BID}]: Snapshot count'
-        type: DEPENDENT
-        key: pbs.group.count["{#STORE}","{#NS}","{#BTYPE}","{#BID}"]
-        delay: '0'
-        history: 30d
-        description: Number of snapshots in the group.
-        preprocessing:
-        - type: JSONPATH
-          parameters:
-          - $['backup-count']
-        master_item:
-          key: pbs.group.raw["{#STORE}","{#NS}","{#BTYPE}","{#BID}"]
-        tags:
-        - tag: component
-          value: backup
-        - *id003
-        - *id004
       overrides:
       - name: No freshness triggers for groups marked in comment
         step: '1'
@@ -2052,53 +718,6 @@ zabbix_export:
       enabled_lifetime_type: DISABLE_NEVER
       description: Discovers configured sync jobs.
       item_prototypes:
-      - uuid: 61f9579d7e7a433f8b5b93470f41aba5
-        name: 'PBS: Sync job [{#JOB.NAME}]: Last run state'
-        type: DEPENDENT
-        key: pbs.job.state[sync,"{#JOB.ID}"]
-        delay: '0'
-        history: 30d
-        description: 'Result of the last run: 0 OK, 1 warnings, 2 error, 3 running, 4 never run.'
-        valuemap:
-          name: PBS job state
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var j = JSON.parse(value).filter(function (x) { return x.id === '{#JOB.ID}'; })[0];
-            if (!j) throw 'Job {#JOB.ID} not found';
-            return j.code;
-        master_item:
-          key: pbs.jobs[sync]
-        tags:
-        - tag: component
-          value: jobs
-        - &id005
-          tag: job_type
-          value: sync
-        - &id006
-          tag: job
-          value: '{#JOB.NAME}'
-        trigger_prototypes:
-        - uuid: eb9b10818eca486c83c69b027212ff97
-          expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[sync,"{#JOB.ID}"])=2
-          name: 'PBS: Sync job [{#JOB.NAME}]: Last run failed'
-          priority: AVERAGE
-          opdata: '{ITEM.LASTVALUE1}'
-          description: 'The last run of the sync job ended with an error. Error text is in item "Sync job [{#JOB.NAME}]: Last run result".'
-          dependencies:
-          - name: 'PBS: API is unavailable'
-            expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-        - uuid: 5ba1638983a6476b9d3da2599d6f61fa
-          expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[sync,"{#JOB.ID}"])=1
-          name: 'PBS: Sync job [{#JOB.NAME}]: Last run finished with warnings'
-          priority: WARNING
-          description: The last run of the sync job finished with warnings.
-          dependencies:
-          - name: 'PBS: API is unavailable'
-            expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-          - name: 'PBS: Sync job [{#JOB.NAME}]: Last run failed'
-            expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[sync,"{#JOB.ID}"])=2
       - uuid: f1b9871460d14ec28132e90ef9554011
         name: 'PBS: Sync job [{#JOB.NAME}]: Last run result'
         type: DEPENDENT
@@ -2106,7 +725,7 @@ zabbix_export:
         delay: '0'
         history: 30d
         value_type: CHAR
-        description: 'Last run result text ("OK", "WARNINGS: n" or the error message).'
+        description: 'Result of the last run: "OK", "WARNINGS: n", the error message, "running" or "never run".'
         preprocessing:
         - type: JAVASCRIPT
           parameters:
@@ -2122,60 +741,30 @@ zabbix_export:
         tags:
         - tag: component
           value: jobs
-        - *id005
-        - *id006
-      - uuid: 117fcff75fa843cfbd50294429106dc2
-        name: 'PBS: Sync job [{#JOB.NAME}]: Last run end'
-        type: DEPENDENT
-        key: pbs.job.last[sync,"{#JOB.ID}"]
-        delay: '0'
-        units: unixtime
-        description: End time of the last run (0 = never).
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var j = JSON.parse(value).filter(function (x) { return x.id === '{#JOB.ID}'; })[0];
-            if (!j) throw 'Job {#JOB.ID} not found';
-            return j.last;
-        master_item:
-          key: pbs.jobs[sync]
-        tags:
-        - tag: component
-          value: jobs
-        - *id005
-        - *id006
+        - tag: job_type
+          value: sync
+        - tag: job
+          value: '{#JOB.NAME}'
         trigger_prototypes:
-        - uuid: 76b3b9846b1d4d91a3b621d62e858bba
-          expression: last(/Proxmox Backup Server by HTTP/pbs.job.next[sync,"{#JOB.ID}"])>0 and last(/Proxmox Backup Server by HTTP/pbs.job.last[sync,"{#JOB.ID}"])>0 and (now()-last(/Proxmox Backup Server by HTTP/pbs.job.last[sync,"{#JOB.ID}"]))/3600>{$PBS.JOB.MAX.AGE:"sync"}
-          name: 'PBS: Sync job [{#JOB.NAME}]: Has not run for more than {$PBS.JOB.MAX.AGE:"sync"}h'
-          priority: WARNING
-          opdata: 'Last run: {ITEM.LASTVALUE2}'
-          description: The job is scheduled, but its last run is too old. Check that the schedule is correct and that the job is not stuck.
+        - uuid: eb9b10818eca486c83c69b027212ff97
+          expression: last(/Proxmox Backup Server by HTTP/pbs.job.result[sync,"{#JOB.ID}"])<>"OK" and find(/Proxmox Backup Server by HTTP/pbs.job.result[sync,"{#JOB.ID}"],,"regexp","^(WARNINGS|running|never run)")=0
+          name: 'PBS: Sync job [{#JOB.NAME}]: Last run failed'
+          priority: AVERAGE
+          opdata: '{ITEM.LASTVALUE1}'
+          description: The last run of the job ended with an error. The error text is in the problem name and in the item value.
           dependencies:
           - name: 'PBS: API is unavailable'
             expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-      - uuid: 6fba72beb84e4379a73e93240f70b79f
-        name: 'PBS: Sync job [{#JOB.NAME}]: Next run'
-        type: DEPENDENT
-        key: pbs.job.next[sync,"{#JOB.ID}"]
-        delay: '0'
-        units: unixtime
-        description: Next scheduled run (0 = not scheduled).
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var j = JSON.parse(value).filter(function (x) { return x.id === '{#JOB.ID}'; })[0];
-            if (!j) throw 'Job {#JOB.ID} not found';
-            return j.next;
-        master_item:
-          key: pbs.jobs[sync]
-        tags:
-        - tag: component
-          value: jobs
-        - *id005
-        - *id006
+          event_name: 'PBS: Sync job [{#JOB.NAME}]: Last run failed: {ITEM.LASTVALUE1}'
+        - uuid: 5ba1638983a6476b9d3da2599d6f61fa
+          expression: find(/Proxmox Backup Server by HTTP/pbs.job.result[sync,"{#JOB.ID}"],,"regexp","^WARNINGS")=1
+          name: 'PBS: Sync job [{#JOB.NAME}]: Last run finished with warnings'
+          priority: WARNING
+          description: The last run of the sync job finished with warnings.
+          dependencies:
+          - name: 'PBS: API is unavailable'
+            expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
+          opdata: '{ITEM.LASTVALUE1}'
       master_item:
         key: pbs.jobs[sync]
       lld_macro_paths:
@@ -2209,53 +798,6 @@ zabbix_export:
       enabled_lifetime_type: DISABLE_NEVER
       description: Discovers configured verify jobs.
       item_prototypes:
-      - uuid: ef39c6bf1a1d47eea27c28a3236e6e2b
-        name: 'PBS: Verify job [{#JOB.NAME}]: Last run state'
-        type: DEPENDENT
-        key: pbs.job.state[verify,"{#JOB.ID}"]
-        delay: '0'
-        history: 30d
-        description: 'Result of the last run: 0 OK, 1 warnings, 2 error, 3 running, 4 never run.'
-        valuemap:
-          name: PBS job state
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var j = JSON.parse(value).filter(function (x) { return x.id === '{#JOB.ID}'; })[0];
-            if (!j) throw 'Job {#JOB.ID} not found';
-            return j.code;
-        master_item:
-          key: pbs.jobs[verify]
-        tags:
-        - tag: component
-          value: jobs
-        - &id007
-          tag: job_type
-          value: verify
-        - &id008
-          tag: job
-          value: '{#JOB.NAME}'
-        trigger_prototypes:
-        - uuid: ae8e5ab01b9740119c10993ba60fdc19
-          expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[verify,"{#JOB.ID}"])=2
-          name: 'PBS: Verify job [{#JOB.NAME}]: Last run failed'
-          priority: HIGH
-          opdata: '{ITEM.LASTVALUE1}'
-          description: 'The last run of the verify job ended with an error. Error text is in item "Verify job [{#JOB.NAME}]: Last run result".'
-          dependencies:
-          - name: 'PBS: API is unavailable'
-            expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-        - uuid: 221177f702bf49b0a8b54cfb9124561b
-          expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[verify,"{#JOB.ID}"])=1
-          name: 'PBS: Verify job [{#JOB.NAME}]: Last run finished with warnings'
-          priority: WARNING
-          description: The last run of the verify job finished with warnings.
-          dependencies:
-          - name: 'PBS: API is unavailable'
-            expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-          - name: 'PBS: Verify job [{#JOB.NAME}]: Last run failed'
-            expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[verify,"{#JOB.ID}"])=2
       - uuid: fc05fac389704a80bf02149980f6c744
         name: 'PBS: Verify job [{#JOB.NAME}]: Last run result'
         type: DEPENDENT
@@ -2263,7 +805,7 @@ zabbix_export:
         delay: '0'
         history: 30d
         value_type: CHAR
-        description: 'Last run result text ("OK", "WARNINGS: n" or the error message).'
+        description: 'Result of the last run: "OK", "WARNINGS: n", the error message, "running" or "never run".'
         preprocessing:
         - type: JAVASCRIPT
           parameters:
@@ -2279,60 +821,30 @@ zabbix_export:
         tags:
         - tag: component
           value: jobs
-        - *id007
-        - *id008
-      - uuid: 07a3e7bf9c5145d2b93f7d886ee6df28
-        name: 'PBS: Verify job [{#JOB.NAME}]: Last run end'
-        type: DEPENDENT
-        key: pbs.job.last[verify,"{#JOB.ID}"]
-        delay: '0'
-        units: unixtime
-        description: End time of the last run (0 = never).
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var j = JSON.parse(value).filter(function (x) { return x.id === '{#JOB.ID}'; })[0];
-            if (!j) throw 'Job {#JOB.ID} not found';
-            return j.last;
-        master_item:
-          key: pbs.jobs[verify]
-        tags:
-        - tag: component
-          value: jobs
-        - *id007
-        - *id008
+        - tag: job_type
+          value: verify
+        - tag: job
+          value: '{#JOB.NAME}'
         trigger_prototypes:
-        - uuid: d000462ef70247cdba51626f375d38b7
-          expression: last(/Proxmox Backup Server by HTTP/pbs.job.next[verify,"{#JOB.ID}"])>0 and last(/Proxmox Backup Server by HTTP/pbs.job.last[verify,"{#JOB.ID}"])>0 and (now()-last(/Proxmox Backup Server by HTTP/pbs.job.last[verify,"{#JOB.ID}"]))/3600>{$PBS.JOB.MAX.AGE:"verify"}
-          name: 'PBS: Verify job [{#JOB.NAME}]: Has not run for more than {$PBS.JOB.MAX.AGE:"verify"}h'
-          priority: WARNING
-          opdata: 'Last run: {ITEM.LASTVALUE2}'
-          description: The job is scheduled, but its last run is too old. Check that the schedule is correct and that the job is not stuck.
+        - uuid: ae8e5ab01b9740119c10993ba60fdc19
+          expression: last(/Proxmox Backup Server by HTTP/pbs.job.result[verify,"{#JOB.ID}"])<>"OK" and find(/Proxmox Backup Server by HTTP/pbs.job.result[verify,"{#JOB.ID}"],,"regexp","^(WARNINGS|running|never run)")=0
+          name: 'PBS: Verify job [{#JOB.NAME}]: Last run failed'
+          priority: HIGH
+          opdata: '{ITEM.LASTVALUE1}'
+          description: The last run of the job ended with an error. The error text is in the problem name and in the item value.
           dependencies:
           - name: 'PBS: API is unavailable'
             expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-      - uuid: 6d7e0a2c917945aab2a3b215f308b6d7
-        name: 'PBS: Verify job [{#JOB.NAME}]: Next run'
-        type: DEPENDENT
-        key: pbs.job.next[verify,"{#JOB.ID}"]
-        delay: '0'
-        units: unixtime
-        description: Next scheduled run (0 = not scheduled).
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var j = JSON.parse(value).filter(function (x) { return x.id === '{#JOB.ID}'; })[0];
-            if (!j) throw 'Job {#JOB.ID} not found';
-            return j.next;
-        master_item:
-          key: pbs.jobs[verify]
-        tags:
-        - tag: component
-          value: jobs
-        - *id007
-        - *id008
+          event_name: 'PBS: Verify job [{#JOB.NAME}]: Last run failed: {ITEM.LASTVALUE1}'
+        - uuid: 221177f702bf49b0a8b54cfb9124561b
+          expression: find(/Proxmox Backup Server by HTTP/pbs.job.result[verify,"{#JOB.ID}"],,"regexp","^WARNINGS")=1
+          name: 'PBS: Verify job [{#JOB.NAME}]: Last run finished with warnings'
+          priority: WARNING
+          description: The last run of the verify job finished with warnings.
+          dependencies:
+          - name: 'PBS: API is unavailable'
+            expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
+          opdata: '{ITEM.LASTVALUE1}'
       master_item:
         key: pbs.jobs[verify]
       lld_macro_paths:
@@ -2366,53 +878,6 @@ zabbix_export:
       enabled_lifetime_type: DISABLE_NEVER
       description: Discovers configured prune jobs.
       item_prototypes:
-      - uuid: 8877cd5065094b24a0b28d224e71a972
-        name: 'PBS: Prune job [{#JOB.NAME}]: Last run state'
-        type: DEPENDENT
-        key: pbs.job.state[prune,"{#JOB.ID}"]
-        delay: '0'
-        history: 30d
-        description: 'Result of the last run: 0 OK, 1 warnings, 2 error, 3 running, 4 never run.'
-        valuemap:
-          name: PBS job state
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var j = JSON.parse(value).filter(function (x) { return x.id === '{#JOB.ID}'; })[0];
-            if (!j) throw 'Job {#JOB.ID} not found';
-            return j.code;
-        master_item:
-          key: pbs.jobs[prune]
-        tags:
-        - tag: component
-          value: jobs
-        - &id009
-          tag: job_type
-          value: prune
-        - &id010
-          tag: job
-          value: '{#JOB.NAME}'
-        trigger_prototypes:
-        - uuid: 5f43991d72f54c9c84e598109523283d
-          expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[prune,"{#JOB.ID}"])=2
-          name: 'PBS: Prune job [{#JOB.NAME}]: Last run failed'
-          priority: AVERAGE
-          opdata: '{ITEM.LASTVALUE1}'
-          description: 'The last run of the prune job ended with an error. Error text is in item "Prune job [{#JOB.NAME}]: Last run result".'
-          dependencies:
-          - name: 'PBS: API is unavailable'
-            expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-        - uuid: cb7dea4363ff47fa88e3e541f0300d73
-          expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[prune,"{#JOB.ID}"])=1
-          name: 'PBS: Prune job [{#JOB.NAME}]: Last run finished with warnings'
-          priority: WARNING
-          description: The last run of the prune job finished with warnings.
-          dependencies:
-          - name: 'PBS: API is unavailable'
-            expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-          - name: 'PBS: Prune job [{#JOB.NAME}]: Last run failed'
-            expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[prune,"{#JOB.ID}"])=2
       - uuid: 3ac8ceb60ba84c8197debc1c95688dc1
         name: 'PBS: Prune job [{#JOB.NAME}]: Last run result'
         type: DEPENDENT
@@ -2420,7 +885,7 @@ zabbix_export:
         delay: '0'
         history: 30d
         value_type: CHAR
-        description: 'Last run result text ("OK", "WARNINGS: n" or the error message).'
+        description: 'Result of the last run: "OK", "WARNINGS: n", the error message, "running" or "never run".'
         preprocessing:
         - type: JAVASCRIPT
           parameters:
@@ -2436,60 +901,30 @@ zabbix_export:
         tags:
         - tag: component
           value: jobs
-        - *id009
-        - *id010
-      - uuid: b32aaa2865774945a55a8e64c89d2877
-        name: 'PBS: Prune job [{#JOB.NAME}]: Last run end'
-        type: DEPENDENT
-        key: pbs.job.last[prune,"{#JOB.ID}"]
-        delay: '0'
-        units: unixtime
-        description: End time of the last run (0 = never).
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var j = JSON.parse(value).filter(function (x) { return x.id === '{#JOB.ID}'; })[0];
-            if (!j) throw 'Job {#JOB.ID} not found';
-            return j.last;
-        master_item:
-          key: pbs.jobs[prune]
-        tags:
-        - tag: component
-          value: jobs
-        - *id009
-        - *id010
+        - tag: job_type
+          value: prune
+        - tag: job
+          value: '{#JOB.NAME}'
         trigger_prototypes:
-        - uuid: be7197adc3984e1198956869785877f1
-          expression: last(/Proxmox Backup Server by HTTP/pbs.job.next[prune,"{#JOB.ID}"])>0 and last(/Proxmox Backup Server by HTTP/pbs.job.last[prune,"{#JOB.ID}"])>0 and (now()-last(/Proxmox Backup Server by HTTP/pbs.job.last[prune,"{#JOB.ID}"]))/3600>{$PBS.JOB.MAX.AGE:"prune"}
-          name: 'PBS: Prune job [{#JOB.NAME}]: Has not run for more than {$PBS.JOB.MAX.AGE:"prune"}h'
-          priority: WARNING
-          opdata: 'Last run: {ITEM.LASTVALUE2}'
-          description: The job is scheduled, but its last run is too old. Check that the schedule is correct and that the job is not stuck.
+        - uuid: 5f43991d72f54c9c84e598109523283d
+          expression: last(/Proxmox Backup Server by HTTP/pbs.job.result[prune,"{#JOB.ID}"])<>"OK" and find(/Proxmox Backup Server by HTTP/pbs.job.result[prune,"{#JOB.ID}"],,"regexp","^(WARNINGS|running|never run)")=0
+          name: 'PBS: Prune job [{#JOB.NAME}]: Last run failed'
+          priority: AVERAGE
+          opdata: '{ITEM.LASTVALUE1}'
+          description: The last run of the job ended with an error. The error text is in the problem name and in the item value.
           dependencies:
           - name: 'PBS: API is unavailable'
             expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-      - uuid: d9715b235a524dedb40889c29602b94a
-        name: 'PBS: Prune job [{#JOB.NAME}]: Next run'
-        type: DEPENDENT
-        key: pbs.job.next[prune,"{#JOB.ID}"]
-        delay: '0'
-        units: unixtime
-        description: Next scheduled run (0 = not scheduled).
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var j = JSON.parse(value).filter(function (x) { return x.id === '{#JOB.ID}'; })[0];
-            if (!j) throw 'Job {#JOB.ID} not found';
-            return j.next;
-        master_item:
-          key: pbs.jobs[prune]
-        tags:
-        - tag: component
-          value: jobs
-        - *id009
-        - *id010
+          event_name: 'PBS: Prune job [{#JOB.NAME}]: Last run failed: {ITEM.LASTVALUE1}'
+        - uuid: cb7dea4363ff47fa88e3e541f0300d73
+          expression: find(/Proxmox Backup Server by HTTP/pbs.job.result[prune,"{#JOB.ID}"],,"regexp","^WARNINGS")=1
+          name: 'PBS: Prune job [{#JOB.NAME}]: Last run finished with warnings'
+          priority: WARNING
+          description: The last run of the prune job finished with warnings.
+          dependencies:
+          - name: 'PBS: API is unavailable'
+            expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
+          opdata: '{ITEM.LASTVALUE1}'
       master_item:
         key: pbs.jobs[prune]
       lld_macro_paths:
@@ -2523,53 +958,6 @@ zabbix_export:
       enabled_lifetime_type: DISABLE_NEVER
       description: Discovers configured garbage collections.
       item_prototypes:
-      - uuid: fc9a055049f94ed888175f4783048443
-        name: 'PBS: Garbage collection [{#JOB.NAME}]: Last run state'
-        type: DEPENDENT
-        key: pbs.job.state[gc,"{#JOB.ID}"]
-        delay: '0'
-        history: 30d
-        description: 'Result of the last run: 0 OK, 1 warnings, 2 error, 3 running, 4 never run.'
-        valuemap:
-          name: PBS job state
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var j = JSON.parse(value).filter(function (x) { return x.id === '{#JOB.ID}'; })[0];
-            if (!j) throw 'Job {#JOB.ID} not found';
-            return j.code;
-        master_item:
-          key: pbs.jobs[gc]
-        tags:
-        - tag: component
-          value: jobs
-        - &id011
-          tag: job_type
-          value: gc
-        - &id012
-          tag: job
-          value: '{#JOB.NAME}'
-        trigger_prototypes:
-        - uuid: 4c4875916a9844798917a883e2ad4a58
-          expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[gc,"{#JOB.ID}"])=2
-          name: 'PBS: Garbage collection [{#JOB.NAME}]: Last run failed'
-          priority: AVERAGE
-          opdata: '{ITEM.LASTVALUE1}'
-          description: 'The last run of the garbage collection ended with an error. Error text is in item "Garbage collection [{#JOB.NAME}]: Last run result".'
-          dependencies:
-          - name: 'PBS: API is unavailable'
-            expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-        - uuid: 1dd73394879d46069ae5a1c6fa37ee37
-          expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[gc,"{#JOB.ID}"])=1
-          name: 'PBS: Garbage collection [{#JOB.NAME}]: Last run finished with warnings'
-          priority: WARNING
-          description: The last run of the garbage collection finished with warnings.
-          dependencies:
-          - name: 'PBS: API is unavailable'
-            expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-          - name: 'PBS: Garbage collection [{#JOB.NAME}]: Last run failed'
-            expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[gc,"{#JOB.ID}"])=2
       - uuid: 99ff9ce16ce34b5b93c69cee0c90762a
         name: 'PBS: Garbage collection [{#JOB.NAME}]: Last run result'
         type: DEPENDENT
@@ -2577,7 +965,7 @@ zabbix_export:
         delay: '0'
         history: 30d
         value_type: CHAR
-        description: 'Last run result text ("OK", "WARNINGS: n" or the error message).'
+        description: 'Result of the last run: "OK", "WARNINGS: n", the error message, "running" or "never run".'
         preprocessing:
         - type: JAVASCRIPT
           parameters:
@@ -2593,82 +981,30 @@ zabbix_export:
         tags:
         - tag: component
           value: jobs
-        - *id011
-        - *id012
-      - uuid: 63260a6a7c7f4a7299c43aa43f4b5a3f
-        name: 'PBS: Garbage collection [{#JOB.NAME}]: Last run end'
-        type: DEPENDENT
-        key: pbs.job.last[gc,"{#JOB.ID}"]
-        delay: '0'
-        units: unixtime
-        description: End time of the last run (0 = never).
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var j = JSON.parse(value).filter(function (x) { return x.id === '{#JOB.ID}'; })[0];
-            if (!j) throw 'Job {#JOB.ID} not found';
-            return j.last;
-        master_item:
-          key: pbs.jobs[gc]
-        tags:
-        - tag: component
-          value: jobs
-        - *id011
-        - *id012
+        - tag: job_type
+          value: gc
+        - tag: job
+          value: '{#JOB.NAME}'
         trigger_prototypes:
-        - uuid: aa49e5b590474339b0fd532a5817eca5
-          expression: last(/Proxmox Backup Server by HTTP/pbs.job.next[gc,"{#JOB.ID}"])>0 and last(/Proxmox Backup Server by HTTP/pbs.job.last[gc,"{#JOB.ID}"])>0 and (now()-last(/Proxmox Backup Server by HTTP/pbs.job.last[gc,"{#JOB.ID}"]))/3600>{$PBS.JOB.MAX.AGE:"gc"}
-          name: 'PBS: Garbage collection [{#JOB.NAME}]: Has not run for more than {$PBS.JOB.MAX.AGE:"gc"}h'
-          priority: WARNING
-          opdata: 'Last run: {ITEM.LASTVALUE2}'
-          description: The job is scheduled, but its last run is too old. Check that the schedule is correct and that the job is not stuck.
+        - uuid: 4c4875916a9844798917a883e2ad4a58
+          expression: last(/Proxmox Backup Server by HTTP/pbs.job.result[gc,"{#JOB.ID}"])<>"OK" and find(/Proxmox Backup Server by HTTP/pbs.job.result[gc,"{#JOB.ID}"],,"regexp","^(WARNINGS|running|never run)")=0
+          name: 'PBS: Garbage collection [{#JOB.NAME}]: Last run failed'
+          priority: AVERAGE
+          opdata: '{ITEM.LASTVALUE1}'
+          description: The last run of the job ended with an error. The error text is in the problem name and in the item value.
           dependencies:
           - name: 'PBS: API is unavailable'
             expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-      - uuid: b159d91eea2945deb6a3ad0984505197
-        name: 'PBS: Garbage collection [{#JOB.NAME}]: Next run'
-        type: DEPENDENT
-        key: pbs.job.next[gc,"{#JOB.ID}"]
-        delay: '0'
-        units: unixtime
-        description: Next scheduled run (0 = not scheduled).
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var j = JSON.parse(value).filter(function (x) { return x.id === '{#JOB.ID}'; })[0];
-            if (!j) throw 'Job {#JOB.ID} not found';
-            return j.next;
-        master_item:
-          key: pbs.jobs[gc]
-        tags:
-        - tag: component
-          value: jobs
-        - *id011
-        - *id012
-      - uuid: 809bdd0c487a4b61a895028d1784d47b
-        name: 'PBS: Garbage collection [{#JOB.NAME}]: Pending bytes'
-        type: DEPENDENT
-        key: pbs.job.pending[gc,"{#JOB.ID}"]
-        delay: '0'
-        units: B
-        description: Bytes that can be removed by the next garbage collection.
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var j = JSON.parse(value).filter(function (x) { return x.id === '{#JOB.ID}'; })[0];
-            if (!j) throw 'Job {#JOB.ID} not found';
-            if (j.pending === undefined || j.pending === null) throw 'no data';
-            return j.pending;
-        master_item:
-          key: pbs.jobs[gc]
-        tags:
-        - tag: component
-          value: jobs
-        - *id011
-        - *id012
+          event_name: 'PBS: Garbage collection [{#JOB.NAME}]: Last run failed: {ITEM.LASTVALUE1}'
+        - uuid: 1dd73394879d46069ae5a1c6fa37ee37
+          expression: find(/Proxmox Backup Server by HTTP/pbs.job.result[gc,"{#JOB.ID}"],,"regexp","^WARNINGS")=1
+          name: 'PBS: Garbage collection [{#JOB.NAME}]: Last run finished with warnings'
+          priority: WARNING
+          description: The last run of the garbage collection finished with warnings.
+          dependencies:
+          - name: 'PBS: API is unavailable'
+            expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
+          opdata: '{ITEM.LASTVALUE1}'
       master_item:
         key: pbs.jobs[gc]
       lld_macro_paths:
@@ -2682,445 +1018,6 @@ zabbix_export:
         path: $.schedule
       - lld_macro: '{#JOB.COMMENT}'
         path: $.comment
-    - uuid: 9bf1617ce44b4c35ad0970479285a59c
-      name: 'PBS: Tape backup job discovery'
-      type: DEPENDENT
-      key: pbs.jobs.discovery[tape]
-      delay: '0'
-      filter:
-        evaltype: AND
-        conditions:
-        - macro: '{#JOB.ID}'
-          value: '{$PBS.JOB.MATCHES}'
-          operator: MATCHES_REGEX
-          formulaid: A
-        - macro: '{#JOB.ID}'
-          value: '{$PBS.JOB.NOT_MATCHES}'
-          operator: NOT_MATCHES_REGEX
-          formulaid: B
-      lifetime: '{$PBS.LLD.LIFETIME}'
-      enabled_lifetime_type: DISABLE_NEVER
-      description: Discovers configured tape backup jobs.
-      item_prototypes:
-      - uuid: cb9456b513e94f7b9455d811842252c6
-        name: 'PBS: Tape backup job [{#JOB.NAME}]: Last run state'
-        type: DEPENDENT
-        key: pbs.job.state[tape,"{#JOB.ID}"]
-        delay: '0'
-        history: 30d
-        description: 'Result of the last run: 0 OK, 1 warnings, 2 error, 3 running, 4 never run.'
-        valuemap:
-          name: PBS job state
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var j = JSON.parse(value).filter(function (x) { return x.id === '{#JOB.ID}'; })[0];
-            if (!j) throw 'Job {#JOB.ID} not found';
-            return j.code;
-        master_item:
-          key: pbs.jobs[tape]
-        tags:
-        - tag: component
-          value: jobs
-        - &id013
-          tag: job_type
-          value: tape
-        - &id014
-          tag: job
-          value: '{#JOB.NAME}'
-        trigger_prototypes:
-        - uuid: c68d6f21cfd645a2803824351c8cc692
-          expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[tape,"{#JOB.ID}"])=2
-          name: 'PBS: Tape backup job [{#JOB.NAME}]: Last run failed'
-          priority: AVERAGE
-          opdata: '{ITEM.LASTVALUE1}'
-          description: 'The last run of the tape backup job ended with an error. Error text is in item "Tape backup job [{#JOB.NAME}]: Last run result".'
-          dependencies:
-          - name: 'PBS: API is unavailable'
-            expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-        - uuid: 5679cbe33e724ff5b51632d9f51dbef5
-          expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[tape,"{#JOB.ID}"])=1
-          name: 'PBS: Tape backup job [{#JOB.NAME}]: Last run finished with warnings'
-          priority: WARNING
-          description: The last run of the tape backup job finished with warnings.
-          dependencies:
-          - name: 'PBS: API is unavailable'
-            expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-          - name: 'PBS: Tape backup job [{#JOB.NAME}]: Last run failed'
-            expression: last(/Proxmox Backup Server by HTTP/pbs.job.state[tape,"{#JOB.ID}"])=2
-      - uuid: afd0db38320c4088b118ac09dc1b70a3
-        name: 'PBS: Tape backup job [{#JOB.NAME}]: Last run result'
-        type: DEPENDENT
-        key: pbs.job.result[tape,"{#JOB.ID}"]
-        delay: '0'
-        history: 30d
-        value_type: CHAR
-        description: 'Last run result text ("OK", "WARNINGS: n" or the error message).'
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var j = JSON.parse(value).filter(function (x) { return x.id === '{#JOB.ID}'; })[0];
-            if (!j) throw 'Job {#JOB.ID} not found';
-            return j.state;
-        - type: DISCARD_UNCHANGED_HEARTBEAT
-          parameters:
-          - 1d
-        master_item:
-          key: pbs.jobs[tape]
-        tags:
-        - tag: component
-          value: jobs
-        - *id013
-        - *id014
-      - uuid: 69bcc5160a564f2ba05795a06209cb3d
-        name: 'PBS: Tape backup job [{#JOB.NAME}]: Last run end'
-        type: DEPENDENT
-        key: pbs.job.last[tape,"{#JOB.ID}"]
-        delay: '0'
-        units: unixtime
-        description: End time of the last run (0 = never).
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var j = JSON.parse(value).filter(function (x) { return x.id === '{#JOB.ID}'; })[0];
-            if (!j) throw 'Job {#JOB.ID} not found';
-            return j.last;
-        master_item:
-          key: pbs.jobs[tape]
-        tags:
-        - tag: component
-          value: jobs
-        - *id013
-        - *id014
-        trigger_prototypes:
-        - uuid: 2d4c81ba6a3740588ce17f7f652c7efc
-          expression: last(/Proxmox Backup Server by HTTP/pbs.job.next[tape,"{#JOB.ID}"])>0 and last(/Proxmox Backup Server by HTTP/pbs.job.last[tape,"{#JOB.ID}"])>0 and (now()-last(/Proxmox Backup Server by HTTP/pbs.job.last[tape,"{#JOB.ID}"]))/3600>{$PBS.JOB.MAX.AGE:"tape"}
-          name: 'PBS: Tape backup job [{#JOB.NAME}]: Has not run for more than {$PBS.JOB.MAX.AGE:"tape"}h'
-          priority: WARNING
-          opdata: 'Last run: {ITEM.LASTVALUE2}'
-          description: The job is scheduled, but its last run is too old. Check that the schedule is correct and that the job is not stuck.
-          dependencies:
-          - name: 'PBS: API is unavailable'
-            expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-      - uuid: 2d3a83f19e7a4d03bc4ecce0fea4a68c
-        name: 'PBS: Tape backup job [{#JOB.NAME}]: Next run'
-        type: DEPENDENT
-        key: pbs.job.next[tape,"{#JOB.ID}"]
-        delay: '0'
-        units: unixtime
-        description: Next scheduled run (0 = not scheduled).
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var j = JSON.parse(value).filter(function (x) { return x.id === '{#JOB.ID}'; })[0];
-            if (!j) throw 'Job {#JOB.ID} not found';
-            return j.next;
-        master_item:
-          key: pbs.jobs[tape]
-        tags:
-        - tag: component
-          value: jobs
-        - *id013
-        - *id014
-      master_item:
-        key: pbs.jobs[tape]
-      lld_macro_paths:
-      - lld_macro: '{#JOB.ID}'
-        path: $.id
-      - lld_macro: '{#JOB.NAME}'
-        path: $.name
-      - lld_macro: '{#JOB.STORE}'
-        path: $.store
-      - lld_macro: '{#JOB.SCHEDULE}'
-        path: $.schedule
-      - lld_macro: '{#JOB.COMMENT}'
-        path: $.comment
-    - uuid: d4d0d501d5c043ac8eb5b43ebb9916ac
-      name: 'PBS: Disk discovery'
-      type: DEPENDENT
-      key: pbs.disk.discovery
-      delay: '0'
-      filter:
-        evaltype: AND
-        conditions:
-        - macro: '{#DISK}'
-          value: '{$PBS.DISK.MATCHES}'
-          operator: MATCHES_REGEX
-          formulaid: A
-        - macro: '{#DISK}'
-          value: '{$PBS.DISK.NOT_MATCHES}'
-          operator: NOT_MATCHES_REGEX
-          formulaid: B
-      lifetime: '{$PBS.LLD.LIFETIME}'
-      enabled_lifetime_type: DISABLE_NEVER
-      description: Discovers physical disks.
-      item_prototypes:
-      - uuid: 8c93148954664a70a2a954fb36e15433
-        name: 'PBS: Disk [{#DISK}]: SMART status'
-        type: DEPENDENT
-        key: pbs.disk.smart[{#DISK}]
-        delay: '0'
-        history: 30d
-        description: 'SMART overall health: 0 passed, 1 failed, 2 unknown.'
-        valuemap:
-          name: PBS SMART status
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var d = JSON.parse(value).filter(function (x) { return x.name === '{#DISK}'; })[0];
-            if (!d) throw 'Disk {#DISK} not found';
-            return d.status === 'passed' ? 0 : (d.status === 'failed' ? 1 : 2);
-        master_item:
-          key: pbs.disks
-        tags:
-        - tag: component
-          value: disk
-        - &id015
-          tag: disk
-          value: '{#DISK}'
-        trigger_prototypes:
-        - uuid: c1923cb689d84dfd89fd457db844146f
-          expression: last(/Proxmox Backup Server by HTTP/pbs.disk.smart[{#DISK}])=1
-          name: 'PBS: Disk [{#DISK}]: SMART health check failed'
-          priority: HIGH
-          description: SMART reports that the disk is failing. Replace it.
-          dependencies:
-          - name: 'PBS: API is unavailable'
-            expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-      - uuid: c0b6176b03104dcfb958abc08ad42891
-        name: 'PBS: Disk [{#DISK}]: Wearout'
-        type: DEPENDENT
-        key: pbs.disk.wearout[{#DISK}]
-        delay: '0'
-        history: 30d
-        value_type: FLOAT
-        units: '%'
-        description: SSD wearout as shown in the PBS UI (percentage of used life). Absent for HDD.
-        preprocessing:
-        - type: JSONPATH
-          parameters:
-          - $[?(@.name == '{#DISK}')].wearout.first()
-          error_handler: DISCARD_VALUE
-          error_handler_params: ''
-        master_item:
-          key: pbs.disks
-        tags:
-        - tag: component
-          value: disk
-        - *id015
-        trigger_prototypes:
-        - uuid: d727ceaf58194ad7959bed6f7429441d
-          expression: last(/Proxmox Backup Server by HTTP/pbs.disk.wearout[{#DISK}])>{$PBS.DISK.WEAROUT.MAX}
-          name: 'PBS: Disk [{#DISK}]: SSD wearout is high (over {$PBS.DISK.WEAROUT.MAX}%)'
-          priority: WARNING
-          opdata: 'Wearout: {ITEM.LASTVALUE1}'
-          description: The SSD has used most of its rated write endurance. Plan the replacement.
-          dependencies:
-          - name: 'PBS: API is unavailable'
-            expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-      - uuid: 898623d98ef64e9eb7117f52a5cf9a24
-        name: 'PBS: Disk [{#DISK}]: Size'
-        type: DEPENDENT
-        key: pbs.disk.size[{#DISK}]
-        delay: '0'
-        units: B
-        description: Disk size.
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var d = JSON.parse(value).filter(function (x) { return x.name === '{#DISK}'; })[0];
-            if (!d) throw 'Disk {#DISK} not found';
-            return d.size;
-        - type: DISCARD_UNCHANGED_HEARTBEAT
-          parameters:
-          - 1d
-        master_item:
-          key: pbs.disks
-        tags:
-        - tag: component
-          value: disk
-        - *id015
-      - uuid: 821ffdbd4b4e488e81c9707ff5d24d02
-        name: 'PBS: Disk [{#DISK}]: Usage'
-        type: DEPENDENT
-        key: pbs.disk.usage[{#DISK}]
-        delay: '0'
-        value_type: CHAR
-        description: What the disk is used for (zfs, lvm, mounted, partitions, unused...).
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var d = JSON.parse(value).filter(function (x) { return x.name === '{#DISK}'; })[0];
-            if (!d) throw 'Disk {#DISK} not found';
-            return d.used || 'unused';
-        - type: DISCARD_UNCHANGED_HEARTBEAT
-          parameters:
-          - 1d
-        master_item:
-          key: pbs.disks
-        tags:
-        - tag: component
-          value: disk
-        - *id015
-      master_item:
-        key: pbs.disks
-      lld_macro_paths:
-      - lld_macro: '{#DISK}'
-        path: $.name
-      - lld_macro: '{#DISK.MODEL}'
-        path: $.model
-      - lld_macro: '{#DISK.SERIAL}'
-        path: $.serial
-    - uuid: 7b105bf3299f437d977fef615a198b2c
-      name: 'PBS: ZFS pool discovery'
-      type: DEPENDENT
-      key: pbs.zfs.discovery
-      delay: '0'
-      lifetime: '{$PBS.LLD.LIFETIME}'
-      enabled_lifetime_type: DISABLE_NEVER
-      description: Discovers ZFS pools.
-      item_prototypes:
-      - uuid: 9b9006ca91c3454c9eda2ddb22e943c3
-        name: 'PBS: ZFS pool [{#POOL}]: Health'
-        type: DEPENDENT
-        key: pbs.zfs.health[{#POOL}]
-        delay: '0'
-        history: 30d
-        value_type: CHAR
-        description: Pool health (ONLINE, DEGRADED, FAULTED...).
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var p = JSON.parse(value).filter(function (x) { return x.name === '{#POOL}'; })[0];
-            if (!p) throw 'Pool {#POOL} not found';
-            return p.health;
-        - type: DISCARD_UNCHANGED_HEARTBEAT
-          parameters:
-          - 1h
-        master_item:
-          key: pbs.zfs
-        tags:
-        - tag: component
-          value: zfs
-        - &id016
-          tag: zpool
-          value: '{#POOL}'
-        trigger_prototypes:
-        - uuid: a393c941b16547bcab1aa17e5aed721f
-          expression: last(/Proxmox Backup Server by HTTP/pbs.zfs.health[{#POOL}])<>"ONLINE"
-          name: 'PBS: ZFS pool [{#POOL}] is not healthy'
-          priority: HIGH
-          opdata: 'State: {ITEM.LASTVALUE1}'
-          description: ZFS pool state is not ONLINE. Check "zpool status".
-          dependencies:
-          - name: 'PBS: API is unavailable'
-            expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-      - uuid: 186ebded7a3841b3b69d5787d26c0112
-        name: 'PBS: ZFS pool [{#POOL}]: Size'
-        type: DEPENDENT
-        key: pbs.zfs.size[{#POOL}]
-        delay: '0'
-        units: B
-        description: Pool size.
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var p = JSON.parse(value).filter(function (x) { return x.name === '{#POOL}'; })[0];
-            if (!p) throw 'Pool {#POOL} not found';
-            return p.size;
-        master_item:
-          key: pbs.zfs
-        tags:
-        - tag: component
-          value: zfs
-        - *id016
-      - uuid: afd1b951a2a6407ea6eeeaa1ba4294c2
-        name: 'PBS: ZFS pool [{#POOL}]: Allocated'
-        type: DEPENDENT
-        key: pbs.zfs.alloc[{#POOL}]
-        delay: '0'
-        units: B
-        description: Allocated space.
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var p = JSON.parse(value).filter(function (x) { return x.name === '{#POOL}'; })[0];
-            if (!p) throw 'Pool {#POOL} not found';
-            return p.alloc;
-        master_item:
-          key: pbs.zfs
-        tags:
-        - tag: component
-          value: zfs
-        - *id016
-      - uuid: ab067abe8c9746e59038523e014a0df7
-        name: 'PBS: ZFS pool [{#POOL}]: Utilization'
-        type: DEPENDENT
-        key: pbs.zfs.pused[{#POOL}]
-        delay: '0'
-        value_type: FLOAT
-        units: '%'
-        description: Allocated space in %. ZFS performance degrades above ~80%.
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var p = JSON.parse(value).filter(function (x) { return x.name === '{#POOL}'; })[0];
-            if (!p) throw 'Pool {#POOL} not found';
-            return p.size > 0 ? p.alloc / p.size * 100 : 0;
-        master_item:
-          key: pbs.zfs
-        tags:
-        - tag: component
-          value: zfs
-        - *id016
-        trigger_prototypes:
-        - uuid: 86982abd1919436993b667da139e5522
-          expression: last(/Proxmox Backup Server by HTTP/pbs.zfs.pused[{#POOL}])>{$PBS.ZFS.PUSED.MAX}
-          name: 'PBS: ZFS pool [{#POOL}]: High utilization (over {$PBS.ZFS.PUSED.MAX}%)'
-          priority: WARNING
-          opdata: 'Used: {ITEM.LASTVALUE1}'
-          description: ZFS pool is filling up; performance degrades on almost full pools.
-          dependencies:
-          - name: 'PBS: API is unavailable'
-            expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-      - uuid: 2eac5454d22e4b409d628066a8913551
-        name: 'PBS: ZFS pool [{#POOL}]: Fragmentation'
-        type: DEPENDENT
-        key: pbs.zfs.frag[{#POOL}]
-        delay: '0'
-        value_type: FLOAT
-        units: '%'
-        description: Pool free space fragmentation.
-        preprocessing:
-        - type: JAVASCRIPT
-          parameters:
-          - |
-            var p = JSON.parse(value).filter(function (x) { return x.name === '{#POOL}'; })[0];
-            if (!p) throw 'Pool {#POOL} not found';
-            if (p.frag === undefined) throw 'no data';
-            return p.frag;
-        master_item:
-          key: pbs.zfs
-        tags:
-        - tag: component
-          value: zfs
-        - *id016
-      master_item:
-        key: pbs.zfs
-      lld_macro_paths:
-      - lld_macro: '{#POOL}'
-        path: $.name
     tags:
     - tag: class
       value: software
@@ -3152,30 +1049,9 @@ zabbix_export:
     - macro: '{$PBS.CPU.UTIL.CRIT}'
       value: '90'
       description: CPU utilization threshold, %.
-    - macro: '{$PBS.CPU.IOWAIT.MAX}'
-      value: '30'
-      description: CPU iowait threshold, %.
-    - macro: '{$PBS.LOAD.PER.CPU.MAX}'
-      value: '1.5'
-      description: Load average per CPU threshold.
-    - macro: '{$PBS.MEMORY.PUSED.MAX}'
-      value: '90'
-      description: Memory utilization threshold, %.
     - macro: '{$PBS.ROOTFS.PUSED.MAX}'
       value: '90'
       description: Root filesystem utilization threshold, %.
-    - macro: '{$PBS.CERT.EXPIRY.WARN}'
-      value: '14'
-      description: Certificate expiry warning, days.
-    - macro: '{$PBS.TASKS.INTERVAL}'
-      value: 5m
-      description: How often to read the task list.
-    - macro: '{$PBS.TASKS.PERIOD}'
-      value: '24'
-      description: Period for task counters and failed task triggers, hours.
-    - macro: '{$PBS.TASKS.LIMIT}'
-      value: '5000'
-      description: Max number of newest tasks requested from the API. Must cover all tasks within {$PBS.TASKS.PERIOD}.
     - macro: '{$PBS.DATASTORE.MATCHES}'
       value: .*
       description: Datastores to discover (regex).
@@ -3188,9 +1064,6 @@ zabbix_export:
     - macro: '{$PBS.DATASTORE.PUSED.CRIT}'
       value: '90'
       description: Datastore usage critical threshold, %. Supports context.
-    - macro: '{$PBS.DATASTORE.FULL.DAYS}'
-      value: '30'
-      description: Warn when the datastore is estimated to be full within N days. Supports context.
     - macro: '{$PBS.GROUP.INTERVAL}'
       value: 15m
       description: How often to check backup group freshness.
@@ -3218,27 +1091,6 @@ zabbix_export:
     - macro: '{$PBS.JOB.NOT_MATCHES}'
       value: CHANGE_IF_NEEDED
       description: Jobs to skip (regex).
-    - macro: '{$PBS.JOB.MAX.AGE}'
-      value: '48'
-      description: Warn when a scheduled job has not run for N hours.
-    - macro: '{$PBS.JOB.MAX.AGE:"verify"}'
-      value: '192'
-      description: Max age for verify jobs (weekly by default), hours.
-    - macro: '{$PBS.JOB.MAX.AGE:"tape"}'
-      value: '192'
-      description: Max age for tape backup jobs, hours.
-    - macro: '{$PBS.DISK.MATCHES}'
-      value: .*
-      description: Disks to discover (regex).
-    - macro: '{$PBS.DISK.NOT_MATCHES}'
-      value: ^(zd|loop|ram|rbd)
-      description: Disks to skip (regex).
-    - macro: '{$PBS.DISK.WEAROUT.MAX}'
-      value: '80'
-      description: SSD wearout threshold, %.
-    - macro: '{$PBS.ZFS.PUSED.MAX}'
-      value: '80'
-      description: ZFS pool utilization threshold, %.
     valuemaps:
     - uuid: d206155c3d1349fea23f7775f2c4def5
       name: PBS API state
@@ -3247,83 +1099,3 @@ zabbix_export:
         newvalue: Unavailable
       - value: '1'
         newvalue: Available
-    - uuid: b2406d34cbf74524bb74945e901cf7ef
-      name: PBS job state
-      mappings:
-      - value: '0'
-        newvalue: OK
-      - value: '1'
-        newvalue: Warnings
-      - value: '2'
-        newvalue: Error
-      - value: '3'
-        newvalue: Running
-      - value: '4'
-        newvalue: Never run
-    - uuid: 844a8f91cd6f4b8e9303f75605df72d2
-      name: PBS SMART status
-      mappings:
-      - value: '0'
-        newvalue: Passed
-      - value: '1'
-        newvalue: Failed
-      - value: '2'
-        newvalue: Unknown
-  triggers:
-  - uuid: 929448507217499dbc6eba3fb13fc314
-    expression: 'last(/Proxmox Backup Server by HTTP/pbs.tasks.count[backup,error])>0 and length(last(/Proxmox Backup Server by HTTP/pbs.tasks.failed[backup]))>0'
-    name: 'PBS: Backup tasks failed in the last {$PBS.TASKS.PERIOD}h'
-    event_name: 'PBS: Backup tasks failed in the last {$PBS.TASKS.PERIOD}h ({ITEM.LASTVALUE1}): {ITEM.LASTVALUE2}'
-    opdata: 'Failed: {ITEM.LASTVALUE1}'
-    priority: HIGH
-    manual_close: 'YES'
-    description: 'There are failed tasks of category "backup" during the last {$PBS.TASKS.PERIOD} hours. The most recent of them are shown in the problem name; the full list is in item "PBS: Failed tasks list". The problem resolves itself when the failed tasks age out of the period, or can be closed manually.'
-    dependencies:
-    - name: 'PBS: API is unavailable'
-      expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-    tags:
-    - tag: component
-      value: tasks
-    - tag: task
-      value: backup
-  - uuid: f0c92f84a231444ca8e01321bde27601
-    expression: 'last(/Proxmox Backup Server by HTTP/pbs.tasks.count[restore,error])>0 and length(last(/Proxmox Backup Server by HTTP/pbs.tasks.failed[restore]))>0'
-    name: 'PBS: Restore tasks failed in the last {$PBS.TASKS.PERIOD}h'
-    event_name: 'PBS: Restore tasks failed in the last {$PBS.TASKS.PERIOD}h ({ITEM.LASTVALUE1}): {ITEM.LASTVALUE2}'
-    opdata: 'Failed: {ITEM.LASTVALUE1}'
-    priority: AVERAGE
-    manual_close: 'YES'
-    description: 'There are failed tasks of category "restore" during the last {$PBS.TASKS.PERIOD} hours. The most recent of them are shown in the problem name; the full list is in item "PBS: Failed tasks list". The problem resolves itself when the failed tasks age out of the period, or can be closed manually.'
-    dependencies:
-    - name: 'PBS: API is unavailable'
-      expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-    tags:
-    - tag: component
-      value: tasks
-    - tag: task
-      value: restore
-  - uuid: 9e5e72e555804287b2b5a9ba565eadb9
-    expression: 'last(/Proxmox Backup Server by HTTP/pbs.tasks.count[other,error])>0 and length(last(/Proxmox Backup Server by HTTP/pbs.tasks.failed[other]))>0'
-    name: 'PBS: Other tasks failed in the last {$PBS.TASKS.PERIOD}h'
-    event_name: 'PBS: Other tasks failed in the last {$PBS.TASKS.PERIOD}h ({ITEM.LASTVALUE1}): {ITEM.LASTVALUE2}'
-    opdata: 'Failed: {ITEM.LASTVALUE1}'
-    priority: WARNING
-    manual_close: 'YES'
-    description: 'There are failed tasks of category "other" during the last {$PBS.TASKS.PERIOD} hours. The most recent of them are shown in the problem name; the full list is in item "PBS: Failed tasks list". The problem resolves itself when the failed tasks age out of the period, or can be closed manually.'
-    dependencies:
-    - name: 'PBS: API is unavailable'
-      expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
-    tags:
-    - tag: component
-      value: tasks
-    - tag: task
-      value: other
-  - uuid: 1df89434eb85454d92f777e2cd9d2080
-    expression: min(/Proxmox Backup Server by HTTP/pbs.load[avg1],5m)/last(/Proxmox Backup Server by HTTP/pbs.cpu.num)>{$PBS.LOAD.PER.CPU.MAX} and last(/Proxmox Backup Server by HTTP/pbs.load[avg5])>0 and last(/Proxmox Backup Server by HTTP/pbs.load[avg15])>=0
-    name: 'PBS: Load average is too high (per CPU load over {$PBS.LOAD.PER.CPU.MAX} for 5m)'
-    priority: AVERAGE
-    opdata: 'Load averages(1m, 5m, 15m): ({ITEM.LASTVALUE1}, {ITEM.LASTVALUE3}, {ITEM.LASTVALUE4}), # of CPUs: {ITEM.LASTVALUE2}'
-    description: Per-CPU load average is too high.
-    dependencies:
-    - name: 'PBS: API is unavailable'
-      expression: last(/Proxmox Backup Server by HTTP/pbs.api.available)=0
